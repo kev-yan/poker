@@ -1,0 +1,64 @@
+{
+    "player_name": "Hero",
+    "positions": {
+        "hero": "HJ",
+        "villains": [
+            {"position": "CO", "description": "Weak rec, over-stabs flop"},
+            {"position": "BB", "description": "French pro, tight, solid"}
+        ]
+    },
+    "stack_sizes": {
+        "hero": 2200,
+        "villains": {
+            "CO": 2200,
+            "BB": 2200
+        }
+    },
+    "blinds": {"small": 5, "big": 10, "straddle": "None"},
+    "preflop": {
+        "hero_action": "Raise to 30",
+        "actions": [
+            {"player": "CO", "action": "Call"},
+            {"player": "BB", "action": "Call"}
+        ],
+        "pot": 95
+    },
+    "flop": {
+        "board": ["Qh", "Jc", "3s"],
+        "actions": [
+            {"player": "BB", "action": "Check"},
+            {"player": "Hero", "action": "Check"},
+            {"player": "CO", "action": "Bet 50"},
+            {"player": "BB", "action": "Call"},
+            {"player": "Hero", "action": "Call"}
+        ],
+        "pot": 245
+    },
+    "turn": {
+        "card": "9c",
+        "actions": [
+            {"player": "BB", "action": "Check"},
+            {"player": "Hero", "action": "Check"},
+            {"player": "CO", "action": "Check"}
+        ]
+    },
+    "river": {
+        "card": "4c",
+        "actions": [
+            {"player": "BB", "action": "Check"},
+            {"player": "Hero", "action": "Bet 140"},
+            {"player": "CO", "action": "Raise to 300"},
+            {"player": "BB", "action": "Call"},
+            {"player": "Hero", "action": "Fold"}
+        ]
+    },
+    "hero_hand": ["Ac", "Qd"],
+    "result": {
+        "hero_action": "Fold",
+        "villain_showdowns": {
+            "CO": ["Qc", "2c"],
+            "BB": ["Kd", "Td"]
+        }
+    },
+    "notes": "Tough lineup, checked flop to induce. Considered river 3-bet bluff with Ac."
+}
