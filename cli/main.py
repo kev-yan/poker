@@ -1,7 +1,8 @@
 import json
 from pathlib import Path
 from utils.io_helpers import load_data, save_data
-from gpt.prompts import generate_coaching_feedback
+from llm.prompts import generate_coaching_feedback
+from llm.coach_api import get_feedback_from_llm
 
 DATA_PATH = Path("data/sample_hand.json")
 
@@ -66,7 +67,8 @@ def main():
 
                 print("Send this hand to the Poker Coach for feedback? (y/n): ")
                 if input().strip().lower() == 'y':
-                    feedback = generate_coaching_feedback(hand)
+                    #feedback = generate_coaching_feedback(hand)
+                    feedback = get_feedback_from_llm(hand)
                     print("\n--- Coaching Feedback ---")
                     print(feedback)
             except FileNotFoundError:
