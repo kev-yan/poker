@@ -1,6 +1,7 @@
 import json
 from pathlib import Path
 from utils.io_helpers import load_data, save_data
+from utils.format import format_hand_for_llm
 from llm.prompts import generate_coaching_feedback
 from llm.coach_api import get_feedback_from_llm
 
@@ -22,7 +23,6 @@ def display_hand_summary(hand):
         print(f"  {pos}: {size}")
 
     print("\nPreflop:")
-    print(f"  Hero Action: {hand['preflop']['hero_action']}")
     for a in hand['preflop']['actions']:
         print(f"  {a['player']}: {a['action']}")
     print(f"  Pot: {hand['preflop']['pot']}")
@@ -44,6 +44,7 @@ def display_hand_summary(hand):
         print(f"  {a['player']}: {a['action']}")
 
     print("\nResult:")
+    
     print(f"  Hero Action: {hand['result']['hero_action']}")
     for villain, cards in hand['result']['villain_showdowns'].items():
         print(f"  {villain}: {', '.join(cards)}")
@@ -63,12 +64,13 @@ def main():
         if choice == '1':
             try:
                 hand = load_data(DATA_PATH)
-                display_hand_summary(hand)
+                formatted_hand = format_hand_for_llm(hand)
+                print("\nHand Breakdown:")
+                print(formatted_hand)
 
                 print("Send this hand to the Poker Coach for feedback? (y/n): ")
                 if input().strip().lower() == 'y':
-                    #feedback = generate_coaching_feedback(hand)
-                    feedback = get_feedback_from_llm(hand)
+                    feedback = get_feedback_from_llm(formatted_hand)
                     print("\n--- Coaching Feedback ---")
                     print(feedback)
             except FileNotFoundError:

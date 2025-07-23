@@ -16,8 +16,8 @@
     },
     "blinds": {"small": 5, "big": 10, "straddle": "None"},
     "preflop": {
-        "hero_action": "Raise to 30",
         "actions": [
+            {"player": "Hero", "action": "Raise to 30"},
             {"player": "CO", "action": "Call"},
             {"player": "BB", "action": "Call"}
         ],
@@ -54,6 +54,7 @@
     },
     "hero_hand": ["Ac", "Qd"],
     "result": {
+        "showdown_occurred": true,
         "hero_action": "Fold",
         "villain_showdowns": {
             "CO": ["Qc", "2c"],
