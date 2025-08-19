@@ -1,5 +1,0 @@
-Hero: BB, $150 effective, AdKd, ($0.25-$0.25)
-UTG-2 raises to $3, Lowjack calls, CO calls, Hero raises to $20, UTG-2 calls, Lowjack calls
-Flop: 2h, Th, 2c (Hero bets $25, LJ calls)
-Turn: Ks (Hero bets $40, LJ calls)
-River: Jh (Hero checks, LJ jams ($65 effective), Hero folds)

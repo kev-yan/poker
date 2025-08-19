@@ -15,3 +15,5 @@ __pycache__/
 # Data
 reels/
 output/
+llm/
+data/
