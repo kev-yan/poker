@@ -295,22 +295,26 @@ def search_weaviate_hybrid(
 # 4) Small NL summary for GPT
 # --------------------------
 
-def summarize_user_hand_nl(
-    cfg, query_doc: Dict[str, Any]
-) -> str:
-    f = query_doc["facets"]
-    t = query_doc["tokens"]
+def build_nl_summary(cfg, pre, flop_rec=None, turn_rec=None, river_rec=None) -> str:
+    """One-paragraph, human-readable summary for the final coaching LLM."""
     parts = [
-        f"Stakes {cfg.stakes_sb}/{cfg.stakes_bb}, {cfg.table_size}-max.",
-        f"Hero {cfg.hero_position}, {cfg.hero_hand}.",
-        f"Preflop: {t['preflop']}."
+        f"Stakes ${_trim_float(cfg.stakes_sb)}/${_trim_float(cfg.stakes_bb)}, {cfg.table_size}-max.",
+        f"Hero {cfg.hero_position} with {cfg.hero_hand}.",
+        f"Preflop: {_pretty_to_human_line(pre.pretty())}."
     ]
-    if "flop" in t:
-        parts.append(f"Flop: {t['flop']} (board texture={f.get('texture_class')}).")
-    if "turn" in t:
-        parts.append(f"Turn: {t['turn']}.")
-    if "river" in t:
-        parts.append(f"River: {t['river']} (runout={f.get('runout_texture_class')}).")
+
+    if flop_rec:
+        flop_board = _fmt_board(getattr(flop_rec, "board", None))
+        parts.append(f"Flop {flop_board}: {_pretty_to_human_line(flop_rec.pretty())}.")
+
+    if turn_rec:
+        turn_card = getattr(turn_rec, "board", None)  # single card like "Tc"
+        parts.append(f"Turn {turn_card}: {_pretty_to_human_line(turn_rec.pretty())}.")
+
+    if river_rec:
+        river_card = getattr(river_rec, "board", None)  # single card like "9h"
+        parts.append(f"River {river_card}: {_pretty_to_human_line(river_rec.pretty())}.")
+
     return " ".join(parts)
 
 
@@ -452,3 +456,18 @@ def _to_dict(resp: Any) -> Dict[str, Any]:
         return json.loads(resp)
 
     raise TypeError(f"Unsupported response type for structured output: {type(resp)}")
+
+def _pretty_to_human_line(pretty_text: str) -> str:
+    # Drop the first header line like "Turn: Tc" or "River: 5h"
+    lines = [ln.strip() for ln in pretty_text.splitlines() if ln.strip()]
+    body = lines[1:] if len(lines) > 1 else lines
+    return ", ".join(body).replace("  ", " ")
+
+def _trim_float(x: float) -> str:
+    s = f"{x:.2f}"
+    return s.rstrip("0").rstrip(".")
+
+def _fmt_board(board: str | None) -> str:
+    if not board:
+        return "?"
+    return " ".join(board[i:i+2] for i in range(0, len(board), 2))

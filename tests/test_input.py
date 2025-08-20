@@ -23,8 +23,9 @@ from utils.rag_pipeline import (
     build_final_rag_schema,
     enrich_user_hand_with_llm,
     search_weaviate_hybrid,
-    summarize_user_hand_nl,
+    build_nl_summary,
 )
+from test_fixtures import serialize_hand_fixture, save_fixture
 from weaviate.classes.init import Auth
 #poker/llm/weaviate/embedding.py
 from utils.embedding import embed
@@ -57,7 +58,7 @@ def analyze_flop(board: str) -> Dict[str, object]:
     ranks = [c[0] for c in cards]
     suits = [c[1] for c in cards]
 
-    # Flush level: 3 (monotone) / 2 (two-tone) / 1 (rainbow)
+    # Flush level: 3 (monotone) / 2 (flush-draw) / 1 (rainbow)
     suit_counts = {s: suits.count(s) for s in set(suits)}
     flush_level = max(suit_counts.values())  # 1..3
 
@@ -222,7 +223,26 @@ def main() -> None:
     # )
 
 # 4) Build a short NL summary of the user hand for the final coaching prompt
-    nl_summary = summarize_user_hand_nl(cfg, enriched_query)
+    #nl_summary = summarize_user_hand_nl(cfg, enriched_query)
+    nl_summary  = build_nl_summary(
+        cfg=cfg,
+        pre=pre,
+        flop_rec=flop_result.record if flop_result else None,
+        turn_rec=turn_result.record if turn_result else None,
+        river_rec=river_result.record if river_result else None
+    )
+
+    # fixture = serialize_hand_fixture(
+    #     cfg=cfg,
+    #     pre=pre,
+    #     flop_result=flop_result,
+    #     turn_result=turn_result,
+    #     river_result=river_result,
+    #     nl_summary=nl_summary,
+    #     raw_query=raw_query,
+    # )
+    # save_fixture(fixture)  # writes to data/test_fixtures/last_hand_fixture.json
+
     print("\n--- NL Summary ---")
     print(nl_summary)
 
