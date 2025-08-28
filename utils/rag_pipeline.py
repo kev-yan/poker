@@ -7,7 +7,6 @@ from pydantic import BaseModel
 from langchain_core.messages import AIMessage
 from weaviate.classes.query import MetadataQuery
 
-# your modules
 from utils.game_flow import POS_9MAX
 from utils.preflop_input import PreflopRecord
 from utils.flop_input import FlopRecord
@@ -21,7 +20,7 @@ from utils.river_input import RiverRecord
 _RANK_VAL = {r: i for i, r in enumerate("..23456789TJQKA", start=0)}
 
 def build_final_rag_schema(
-    cfg,                                  # HandConfig
+    cfg,
     pre: PreflopRecord,
     flop_rec: Optional[FlopRecord] = None,
     flop_feats: Optional[Dict[str, Any]] = None,
@@ -48,10 +47,8 @@ def build_final_rag_schema(
 
     line_compact = " || ".join(streets_ordered)
 
-    # Runout features (coarse, good for retrieval)
     runout = _analyze_runout(flop_board, turn_card, river_card)
 
-    # If no external flop_feats provided, fallback from runout
     if flop_board and not flop_feats:
         flop_feats = {
             "flop_board": flop_board,
@@ -85,22 +82,23 @@ def build_final_rag_schema(
         "runout_texture_class": runout["runout_texture_class"],
     }
 
-    schema_string = (
-        f"{_safe_schema_tokens(cfg)} "
-        f"| preflop={tokens['preflop']}"
-        + (f" | flop={tokens['flop']}" if 'flop' in tokens else "")
-        + (f" | turn={tokens['turn']}" if 'turn' in tokens else "")
-        + (f" | river={tokens['river']}" if 'river' in tokens else "")
-    )
+    # schema_string = (
+    #     f"{_safe_schema_tokens(cfg)} "
+    #     f"| preflop={tokens['preflop']}"
+    #     + (f" | flop={tokens['flop']}" if 'flop' in tokens else "")
+    #     + (f" | turn={tokens['turn']}" if 'turn' in tokens else "")
+    #     + (f" | river={tokens['river']}" if 'river' in tokens else "")
+    # )
+    schema_string = _safe_schema_tokens(cfg)
 
-    # vector text: short, structure+texture focused (no exact ranks needed)
     pieces = [
-        _safe_schema_tokens(cfg),
+        _safe_schema_tokens(cfg), #schema tokens may already include the betting line
         f"Preflop: {tokens['preflop']}."
     ]
+    print("1234: ", _safe_schema_tokens(cfg))
     if 'flop' in tokens:
         pieces.append(f"Flop: {tokens['flop']}. "
-                      f"Board is {facets.get('texture_class','unknown')} "
+                      f"Flop is {facets.get('texture_class','unknown')} "
                       f"(flush={facets.get('flush_level')}, paired={facets.get('paired_level')}, "
                       f"straightness={facets.get('straightness')}).")
     if 'turn' in tokens:
@@ -112,8 +110,8 @@ def build_final_rag_schema(
                       f"straightness={facets.get('straightness_runout')}).")
 
     embedding_text = " ".join(pieces)
+    print("5678: ", embedding_text)
 
-    # use pot_type as a safe default hard gate; you can add street_focus when it’s clearly about a street
     hard_filters = {"pot_type": pre.pot_type}
     soft_signals = {
         "texture_class": facets.get("texture_class"),
@@ -141,102 +139,305 @@ def build_final_rag_schema(
 # 2) LLM enrichment: map user doc -> corpus facet schema
 # --------------------------
 
-def enrich_user_hand_with_llm(
-    llm,                   # e.g., langchain_openai.ChatOpenAI(model="gpt-4o-mini")
-    raw_doc: Dict[str, Any],
-) -> Dict[str, Any]:
+ALLOWED_TOP_KEYS = {
+    "title", "schema_string", "embedding_text",
+    "facets", "hard_filters", "soft_signals",
+    "rule_features", "tags"
+}
+
+def enrich_user_hand_with_llm(llm, raw_doc: dict, cfg) -> dict:
     """
-    Ask the LLM to produce the same facet keys your RAG entries use:
-    - hero_hand_class, blocker_pattern
-    - board texture class (already present but LLM can refine)
-    - spr_bucket, stack_depth
-    - street_events (e.g., flop c-bet, turn barrel, river jam), line tokens
-    - pot_type (confirm), heads_up
-    Returns a merged dict: raw_doc + {"enriched": {...}}.
+    Produce a RAG-ready JSON (exact shape from your prompt).
+    - Uses LLM to normalize & infer missing facets.
+    - Merges in deterministic features from raw_doc.
+    - Returns ONLY the keys defined by the prompt (no extras).
     """
+
+    #REMOVED: Do not mention specific hole cards or suits when describing the hand unless the inclusion of specific cards will help convey the concept more evidently. Focus on the spot, not the result.
+    # ----- 1) Your exact instructions as system prompt -----
     system = (
-        "You are a poker strategy normalizer. Convert a user-entered hand into a compact JSON facet schema "
-        "that matches an existing RAG index of poker hands. Focus on structural features and standardized tags. "
-        "Do NOT invent exact cards; use texture words (monotone, paired, draw-heavy, dry)."
-    )
-    # Keep the prompt tight: give tokens + coarse features; ask for the exact keys you index on.
-    user = {
-        "raw_schema_string": raw_doc["schema_string"],
-        "tokens": raw_doc["tokens"],
-        "facets_hint": {
-            "pot_type": raw_doc["facets"].get("pot_type"),
-            "heads_up": raw_doc["facets"].get("heads_up"),
-            "stack_depth": raw_doc["facets"].get("stack_depth"),
-            "texture_class": raw_doc["facets"].get("texture_class"),
-            "runout_texture_class": raw_doc["facets"].get("runout_texture_class"),
+        """
+        You are a Poker strategy assistant that converts short, summarized hand review segments from a hand into a RAG‑ready JSON. Output must be valid JSON only. Your job is to:
+        Produce a compact, normalized schema string that captures the strategic spot.
+        Emit facets for filtering and reranking, using the controlled vocabularies below.
+        Generate a clean embedding_text that combines the schema string and the annotated coaching description.
+        Add rule_features for a lightweight, poker‑aware reranker.
+        Separate hard_filters from soft_signals so the retriever can do graduated backoff.
+        CRITICAL (internal reasoning only): You are given the hero’s exact hand and the board cards in `private_hints`.
+        Use them solely to infer `hero_hand_class` and `blocker_pattern`. Think step-by-step **internally**; do NOT reveal your reasoning or the exact cards. Output VALID JSON only.
+
+        Street focus
+        - Classify on ONE street: river if present, else turn, else flop, unless a specific street is explicitly called out.
+
+        Internal decision cascade (stop at the first match on the chosen street)
+        Assemble the best 5-card hand from hero’s 2 cards + the board.
+        1) Straight-flush (royal flush is a special case of straight-flush) – five in sequence, all same suit. Label as `"straight-flush"`.
+        2) Quads – four of a kind.
+        3) Full house – any three-of-a-kind + any pair.
+        4) Flush – five to the same suit.
+        5) Straight – five in sequence; allow A-5 wheel.
+        6) Set – pocket pair matching exactly one board rank (not trips from board alone).
+        7) Two-pair – two distinct ranks paired (hole+board or board+board+hole).
+        8) Overpair – pocket pair strictly higher than **all** board ranks.
+        9) Underpair – pocket pair lower than the **highest** board rank and not present on the board.
+        10) Top-pair – one hole equals the highest distinct board rank.
+        11) Second-pair – one hole equals the second-highest distinct board rank.
+        12) Weak-pair – one hole equals a lower distinct board rank (3rd+).
+        13) Draw – ONLY if none above applies (e.g., 4-flush, OESD, gutshot)(MUST BE BEFORE THE RIVER).
+        14) Air – none of the above.
+
+        Disambiguation / fail-safes
+        - Never assign **overpair** unless it strictly meets the definition. If unsure between overpair and under/second/weak-pair, choose the latter.
+        - If both a made hand and a draw exist, choose the higher category from the cascade.
+        - `"bluff-catcher"` is for river-only, marginal one-pair spots in clearly polar situations; otherwise use the structural class.
+
+        Blockers
+        - Monotone or 4-flush runouts + hero holds the Ace of that suit → `blocker_pattern="flush_blocker"`.
+        - Highly connected/broadway boards with hero removing common straights → `blocker_pattern="broadway_blocker"`.
+        - Hero blocks the nut straight with key ranks → `blocker_pattern="straight_blocker"`.
+        - Else, null.
+
+        Privacy
+        - Do not echo ranks/suits in the output—only derived labels (e.g., `"overpair"`, `"second-pair"`, `"straight-flush"`, `"flush_blocker"`).
+
+        Vocabulary alignment
+        - `hero_hand_class` must be one of:
+        ["air","draw","weak-pair","second-pair","top-pair","overpair","underpair",
+        "two-pair","set","straight","flush","full house","quads","straight-flush","bluff-catcher"].
+
+        Controlled vocabularies
+        pot_type: single-raised, 3-bet, 4-bet, limped, multiway, heads-up,straddle
+        positions (primary hero pos; villain optional): UTG, EP, MP, LJ, HJ, CO, BTN, SB, BB, straddle, BvB
+        street_events tokens (use any that apply, order by time):
+        open, call, 3bet, 4bet, c-bet, delayed-cbet, donk, check-raise, float, probe, barrel, overbet, jam, min-raise, x, bet-small, bet-mid, bet-big
+        board_texture: dry, two-tone, monotone, paired, paired+, draw-heavy, high-connect, low-connect, coordinated, rainbow
+        hero_hand_class: overpair, underpair, top-pair, second-pair, weak-pair, set, two-pair, trips, straight, flush, full house, quads, combo draw, flush draw, straight draw, gutshot, overcards, air, bluff-catcher
+        stack_dynamics: short, medium, deep, plus SPR<1, SPR~2, SPR~3-5, SPR>5
+        strategic_themes: thin value, exploit, GTO deviation, capped range attack, missed value, bluff catcher, indifferent, sizing tell, induce, deny equity, range advantage, story inconsistency, leveling,nit-villain, loose-villain,strong player, weak player, etc.
+        Derived board features
+        Compute coarse, integer features from the description. If unknown, infer from context or set null.
+        flush_level: 0–4 where 0 none, 3 three to a suit, 4 four to a suit or completed flush environment.
+        paired_level: 0 none, 1 one pair on board, 2 trips/paired+, 3 double-paired+.
+        straightness: 0 low, 1 some connectivity, 2 high connectivity.
+        high_card_bucket: H (A/K present), M (Q/J/T), L (<=9 focus).
+        texture_class: one of board_texture above that best summarizes the runout.
+        If the transcript indicates blockers, set blocker_pattern such as flush_blocker, straight_blocker, ace_blocker, broadway_blocker.
+        Output shape
+        Return one JSON object per video with exactly these keys:
+        json
+        Copy
+        {
+        "title": "string",
+        "schema_string": "single line, normalized tokens (from inputted schema_string)",
+        "embedding_text": "schema_string + hand recap (from inputted embedding_text)",
+        "facets": {
+            "pot_type": "single-raised|3-bet|4-bet|limped|multiway|heads-up",
+            "hero_position": "UTG|EP|...|BB|BvB",
+            "villain_position": "optional",
+            "heads_up": true,
+            "street_focus": "flop|turn|river|all",
+            "board_texture": "see vocab",
+            "flush_level": 0,
+            "paired_level": 0,
+            "straightness": 0,
+            "high_card_bucket": "H|M|L",
+            "texture_class": "see vocab",
+            "hero_hand_class": "see vocab",
+            "blocker_pattern": "string or null",
+            "spr_bucket": "SPR<1|SPR~2|SPR~3-5|SPR>5",
+            "stack_depth": "short|medium|deep",
+            "line_compact": "tokenized street_events, e.g., 'open call | c-bet call | barrel jam'",
+            "positions": ["hero", "villain", "others if relevant"]
         },
-        "embedding_text": raw_doc["embedding_text"],
-        "need_keys": [
-            "hero_hand_class", "blocker_pattern",
-            "spr_bucket", "stack_depth",
-            "texture_class", "runout_texture_class",
-            "street_events",           # list like ["flop c-bet","turn barrel","river jam"]
-            "positions",               # confirm/normalize
-            "line_compact",            # position-aware tokens joined
-            "hard_filters",            # suggest safe gates like {"pot_type":"3-bet"}
-            "soft_signals",            # texture class, heads_up, etc.
-            "tags"                     # standardized tags for retrieval pivots
-        ]
+        "hard_filters": {
+            "pot_type": "value",
+            "street_focus": "value or null if not specific"
+        },
+        "soft_signals": {
+            "texture_class": "value",
+            "hero_hand_class": "value",
+            "spr_bucket": "value",
+            "line_tokens": ["c-bet","check-raise","barrel","jam"],
+            "heads_up": true
+        },
+        "rule_features": {
+            "board": { "texture_class": "value", "flush_level": 0, "paired_level": 0, "straightness": 0, "high_card_bucket": "H|M|L" },
+            "hero": { "hand_class": "value", "blocker_pattern": "value or null" },
+            "context": { "spr_bucket": "value", "position_primary": "hero_position", "line_compact": "same as facets.line_compact" }
+        },
+        "tags": ["comma style tags for UI and quick filters"],
+        }
+
+        Construction rules
+        schema_string is short and machine‑friendly. Example pattern:
+        pot=3-bet HU pos=BTN_vs_SB spr=~2 hero=overpair board=paired dry line=c-bet-call | barrel | river overbet
+        embedding_text = schema_string + hand summary from the perspective of the hero (include hero's actions, villains actions and board textures)
+        Prefer inference: if the board is monotone and the user contains the Ace of the suit on the board, set board_texture=monotone, flush_level>=3, blocker_pattern=flush_blocker, hero_hand_class=bluff-catcher if consistent. Do your best to infer these fields.
+        If the street focus is clearly about one decision point, set street_focus to that street, else all.
+        If info is missing, keep fields but set to "None" and avoid guessing wildly.
+        """
+    )
+
+
+    facets = raw_doc.get("facets", {})
+    fewshots = [
+        {
+            "input": {
+                "schema_string": "pot=3-bet pos=BB spr=~3 board=draw-heavy",
+                "embedding_text": "Preflop 3-bet, BB vs BTN. Flop is Q-high and connected. River checks through."
+            },
+            "private_hints": {
+                "hero_hand": "JhJd", "flop_board": "Qs7c3h", "turn_card": "2d", "river_card": "9s"
+            },
+            "expect": {
+                "facets.hero_hand_class": "underpair"
+            }
+        },
+        {
+            "input": {
+                "schema_string": "pot=single-raised pos=HJ spr=>5 board=dry",
+                "embedding_text": "Single-raised, HJ vs BB. Flop is T-high, dry."
+            },
+            "private_hints": {
+                "hero_hand": "JdJc", "flop_board": "Td4s2c", "turn_card": "7h", "river_card": "Qh"
+            },
+            "expect": {
+                "facets.hero_hand_class": "overpair"
+            }
+        },
+        {
+            "input": {"schema_string": "pot=single-raised pos=CO board=coordinated"},
+            "private_hints": {"hero_hand": "Qs9s", "flop_board": "KhQd7c", "turn_card": "2h", "river_card": "2c"},
+            "expect": {"facets.hero_hand_class": "second-pair"}
+        },
+        {
+            "input": {"schema_string": "pot=single-raised pos=BTN board=monotone"},
+            "private_hints": {"hero_hand": "AdKc", "flop_board": "5d9dQd", "turn_card": "2s", "river_card": "2c"},
+            "expect": {"facets.blocker_pattern": "flush_blocker"}
+        },
+        {
+            "input": {"schema_string": "pot=single-raised pos=BTN board=monotone"},
+            "private_hints": {"hero_hand": "Ah4h", "flop_board": "QhJh9h", "turn_card": "8d", "river_card": "2c"},
+            "expect": {"facets.blocker_pattern": "flush_blocker", "facets.hero_hand_class": "flush"}
+        },
+        {
+            "input": {"schema_string": "pot=single-raised pos=BTN board=monotone"},
+            "private_hints": {"hero_hand": "7h6d", "flop_board": "5h3d9s"},
+            "expect": {"facets.blocker_pattern": "flush_blocker", "facets.hero_hand_class": "GS"}
+        },
+    ]
+
+    user_payload = {
+        "input": {
+            "schema_string": raw_doc.get("schema_string", ""),
+            "embedding_text": raw_doc.get("embedding_text", ""),
+            "facets": facets,                    # includes texture metrics you already computed
+            "tokens": raw_doc.get("tokens", {}), # preflop/flop/turn/river tokens if present
+        },
+        "private_hints": {
+            "hero_hand": getattr(cfg, "hero_hand", None),         # e.g., "QhJh"
+            "flop_board": facets.get("flop_board"),               # e.g., "9dQd2d"
+            "turn_card":  facets.get("turn_card"),                # e.g., "Tc"
+            "river_card": facets.get("river_card"),               # e.g., "9h"
+        },
+        "few_shots": fewshots,
     }
-    # Minimal structured output request
-    schema = {
+    # Constrain output with a JSON schema (enumerations keep it on-rails)
+    response_schema = {
         "type": "json_schema",
         "json_schema": {
-            "name": "RagFacetSchema",
+            "name": "PokerRAGEntry",
             "schema": {
                 "type": "object",
                 "properties": {
-                    "hero_hand_class": {"type": "string"},
-                    "blocker_pattern": {"type": ["string", "null"]},
-                    "spr_bucket": {"type": "string"},
-                    "stack_depth": {"type": "string"},
-                    "texture_class": {"type": "string"},
-                    "runout_texture_class": {"type": "string"},
-                    "street_events": {"type": "array", "items": {"type": "string"}},
-                    "positions": {"type": "array", "items": {"type": "string"}},
-                    "line_compact": {"type": "string"},
+                    "title": {"type": "string"},
+                    "schema_string": {"type": "string"},
+                    "embedding_text": {"type": "string"},
+                    "facets": {
+                        "type": "object",
+                        "properties": {
+                            "pot_type": {"type": ["string", "null"]},
+                            "hero_position": {"type": ["string", "null"]},
+                            "villain_position": {"type": ["string", "null"]},
+                            "heads_up": {"type": ["boolean", "null"]},
+                            "street_focus": {"type": ["string", "null"], "enum": ["flop","turn","river","all", None]},
+                            "board_texture": {"type": ["string", "null"]},
+                            "flush_level": {"type": ["integer", "null"]},
+                            "paired_level": {"type": ["integer", "null"]},
+                            "straightness": {"type": ["integer", "null"]},
+                            "high_card_bucket": {"type": ["string", "null"], "enum": ["H","M","L", None]},
+                            "texture_class": {"type": ["string", "null"]},
+                            "hero_hand_class": {
+                                "type": ["string", "null"],
+                                "enum": [
+                                    "air","draw","weak-pair","second-pair","top-pair",
+                                    "overpair","underpair","two-pair","set","straight",
+                                    "flush","full house","quads","bluff-catcher", None
+                                ]
+                            },
+                            "blocker_pattern": {"type": ["string", "null"]},
+                            "spr_bucket": {"type": ["string", "null"]},
+                            "stack_depth": {"type": ["string", "null"], "enum": ["short","medium","deep", None]},
+                            "line_compact": {"type": ["string", "null"]},
+                            "positions": {"type": "array", "items": {"type": "string"}}
+                        },
+                        "required": ["positions", "line_compact"]
+                    },
                     "hard_filters": {"type": "object"},
                     "soft_signals": {"type": "object"},
+                    "rule_features": {"type": "object"},
                     "tags": {"type": "array", "items": {"type": "string"}}
                 },
-                "required": ["hero_hand_class","spr_bucket","texture_class","line_compact","tags"]
+                "required": ["title","schema_string","embedding_text","facets","hard_filters","soft_signals","rule_features","tags"],
+                "additionalProperties": False
             }
         }
     }
 
     resp = llm.invoke(
-        [{"role": "system", "content": system},
-        {"role": "user", "content": json.dumps(user)}],
-        response_format=schema,
+        [
+            {"role": "system", "content": system},
+            {"role": "user", "content": json.dumps(user_payload)}
+        ],
+        response_format=response_schema,
+        #temperature=0,
     )
 
-    enriched = _to_dict(resp)
+    # Parse & light normalization (no deterministic overrides)
+    content = getattr(resp, "content", resp)
+    try:
+        enriched = json.loads(content) if isinstance(content, str) else json.loads(content or "{}")
+    except Exception:
+        enriched = {}
 
-    out = dict(raw_doc)
-    out.setdefault("facets", {})
-    out.setdefault("soft_signals", {})
-    out.setdefault("hard_filters", {})
-    #print("OUT:", out)
+    enriched = {k: v for k, v in enriched.items() if k in ALLOWED_TOP_KEYS}
+    enriched.setdefault("title", raw_doc.get("title", "User-entered hand"))
+    enriched.setdefault("schema_string", raw_doc.get("schema_string", ""))
+    enriched.setdefault("embedding_text", raw_doc.get("embedding_text", ""))
+    enriched.setdefault("facets", {})
+    enriched.setdefault("hard_filters", {})
+    enriched.setdefault("soft_signals", {})
+    enriched.setdefault("rule_features", {})
+    enriched.setdefault("tags", [])
 
-    # Optionally merge some fields upward for convenience
-    out["facets"].update({
-        "hero_hand_class": enriched.get("hero_hand_class"),
-        "spr_bucket": enriched.get("spr_bucket"),
-        "stack_depth": enriched.get("stack_depth", out["facets"].get("stack_depth")),
-    })
+    # (Optional but harmless) backfill neutral fields from raw_doc if missing
+    f = enriched["facets"]
+    for k in ["positions","line_compact","pot_type","stack_depth","texture_class",
+              "board_texture","flush_level","paired_level","straightness","high_card_bucket",
+              "flop_board","turn_card","river_card"]:
+        if f.get(k) in (None, "", [], {}):
+            val = facets.get(k)
+            if val is not None:
+                f[k] = val
 
-    out["soft_signals"].update(enriched.get("soft_signals", {}))
-    out["hard_filters"].update(enriched.get("hard_filters", {}))
-    out["facets"]["tags"] = enriched.get("tags", [])
-    out["facets"]["street_events"] = enriched.get("street_events", [])
-    out["facets"]["line_compact"] = enriched.get("line_compact", out["facets"].get("line_compact"))
+    # Hard filters: avoid nulls (this prevents your previous GRPC “unknown value type <nil>” error)
+    hf = enriched["hard_filters"]
+    if f.get("pot_type"):
+        hf["pot_type"] = f["pot_type"]
+    if f.get("street_focus") in ("flop","turn","river"):
+        hf["street_focus"] = f["street_focus"]
 
-    return out
+    return enriched
 
 
 
@@ -251,7 +452,6 @@ def search_weaviate_hybrid(
     top_k: int = 8,
     alpha: float = 0.5,
     return_props: Optional[List[str]] = None,
-    # NEW: inject the same embedding fn you used at ingest (384-D)
     embed_fn: Callable[[str], List[float]] = None,
 ) -> Tuple[List[Any], Dict[str, Any]]:
     col = client.collections.get(collection_name)
@@ -271,13 +471,18 @@ def search_weaviate_hybrid(
         "pot_type", "texture_class", "tags", "line_compact"
     ]
 
-    # 👇 Embed the query text with YOUR 384-D model and pass it explicitly
     vec = None
     if embed_fn is not None:
         vec = embed_fn(query_text)
         # Optional sanity check:
         if hasattr(vec, "__len__"):
             assert len(vec) == 384, f"Expected 384-D, got {len(vec)}"
+
+    hf = _sanitize_hard_filters(enriched_query_doc.get("hard_filters"))
+    flt = None
+    for k, v in hf.items():
+        f = Filter.by_property(k).equal(v)
+        flt = f if flt is None else (flt & f)
 
     resp = col.query.hybrid(
         query=query_text,               # BM25 side
@@ -308,11 +513,11 @@ def build_nl_summary(cfg, pre, flop_rec=None, turn_rec=None, river_rec=None) -> 
         parts.append(f"Flop {flop_board}: {_pretty_to_human_line(flop_rec.pretty())}.")
 
     if turn_rec:
-        turn_card = getattr(turn_rec, "board", None)  # single card like "Tc"
+        turn_card = getattr(turn_rec, "board", None)
         parts.append(f"Turn {turn_card}: {_pretty_to_human_line(turn_rec.pretty())}.")
 
     if river_rec:
-        river_card = getattr(river_rec, "board", None)  # single card like "9h"
+        river_card = getattr(river_rec, "board", None)
         parts.append(f"River {river_card}: {_pretty_to_human_line(river_rec.pretty())}.")
 
     return " ".join(parts)
@@ -321,6 +526,12 @@ def build_nl_summary(cfg, pre, flop_rec=None, turn_rec=None, river_rec=None) -> 
 # --------------------------
 # Internals
 # --------------------------
+
+def _sanitize_hard_filters(hard_filters: dict | None) -> dict:
+    if not hard_filters:
+        return {}
+    return {k: v for k, v in hard_filters.items() if v not in (None, "", [], {})}
+
 
 def _safe_schema_tokens(cfg) -> str:
     try:
@@ -422,11 +633,9 @@ def _coarse_straightness(vals: List[int], allow_len: int = 3) -> int:
     return max(score(uniq, need), score(uniq_wheel, need))
 
 def _to_dict(resp: Any) -> Dict[str, Any]:
-    # already a dict
     if isinstance(resp, dict):
         return resp
 
-    # Pydantic model -> dict
     if BaseModel is not None and isinstance(resp, BaseModel):
         return resp.model_dump()
 

@@ -9,20 +9,36 @@ from pathlib import Path
 from langchain_openai import ChatOpenAI
 import weaviate
 from utils.embedding import embed
-from utils.rag_pipeline import enrich_user_hand_with_llm, search_weaviate_hybrid
+from test_fixtures import load_fixture
+from utils.rag_pipeline import enrich_user_hand_with_llm, search_weaviate_hybrid, build_nl_summary
 
 FIXTURE = Path("data/test_fixtures/last_hand_fixture.json")
 
 def test_reuse_fixture():
-    print("entered")
     data = json.loads(FIXTURE.read_text())
-    print("Here???")
 
+    cfg, pre, flop, turn, river, data = load_fixture("data/test_fixtures/last_hand_fixture.json")
+
+    nl_summary = build_nl_summary(
+        cfg=cfg,
+        pre=pre,
+        flop_rec=flop.record,
+        turn_rec=turn.record,
+        river_rec=river.record,
+    )
+
+    print("nl_summary:", nl_summary)
+
+    #return
     raw_query = data.get("raw_query")
     assert raw_query, "Fixture missing raw_query. Re-run CLI to generate it."
-    print("HERE IS RAW QUERY:", raw_query)
-    llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
-    enriched_query = enrich_user_hand_with_llm(llm, raw_query)
+    print("RAW QUERY:", raw_query)
+    llm = ChatOpenAI(model = "gpt-5-mini")
+    enriched_query = enrich_user_hand_with_llm(llm, raw_query, cfg)
+    print("ENRICHED QUERY:", enriched_query, "\n\n\n")
+
+    
+    #NEED TO HAVE ADJUST WEIGHTS FOR DIFFERENT TAGS (retreiving turned top pair hand is more important than a hand in the same pot type)
 
     # Connect Weaviate
     client = weaviate.connect_to_weaviate_cloud(

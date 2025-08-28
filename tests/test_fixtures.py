@@ -1,6 +1,12 @@
 from pathlib import Path
 import json
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
+from dataclasses import dataclass
+from utils.hand_input import HandConfig
+from utils.preflop_input import PreflopRecord, PreflopAction
+from utils.flop_input import FlopRecord, StreetAction
+from utils.turn_input import TurnRecord
+from utils.river_input import RiverRecord
 
 def _actions_to_dicts(actions) -> List[Dict[str, Any]]:
     """Serialize a list of StreetAction/Preflop actions (position, action, amount)."""
@@ -35,12 +41,11 @@ def serialize_hand_fixture(
         },
         "pre": {
             "opener": pre.opener,
-            "open_amount": getattr(pre, "open_amount", None),
+            "open_to": pre.open_to,
             "trail_actions": _actions_to_dicts(getattr(pre, "trail_actions", [])),
             "preflop_tokens": pre.preflop_tokens,
             "players_to_flop": pre.players_to_flop,
             "pot_type": pre.pot_type,
-            "raises": getattr(pre, "raises", None),
         },
         "flop": None,
         "turn": None,
@@ -85,3 +90,69 @@ def save_fixture(fixture: Dict[str, Any], filename: str = "last_hand_fixture.jso
     out_path.write_text(json.dumps(fixture, indent=2))
     print(f"\n[Test Fixture] Saved to {out_path}")
     return out_path
+
+@dataclass
+class Result:
+    record: Any
+    remaining_positions: list[str]
+    showdown_raw: Optional[str] = None
+
+def load_fixture(path: str | Path) -> Tuple[HandConfig, PreflopRecord,
+                                            Optional[Result], Optional[Result], Optional[Result],
+                                            dict]:
+    """
+    Rebuild HandConfig, PreflopRecord, and street Results from a saved JSON fixture.
+    Returns: (cfg, pre, flop_result, turn_result, river_result, full_fixture_dict)
+    """
+    p = Path(path)
+    data = json.loads(p.read_text())
+
+    # HandConfig
+    cfg = HandConfig(
+        stakes_sb=data["cfg"]["stakes_sb"],
+        stakes_bb=data["cfg"]["stakes_bb"],
+        table_size=data["cfg"]["table_size"],
+        hero_position=data["cfg"]["hero_position"],
+        hero_hand=data["cfg"]["hero_hand"],
+        effective_stack=data["cfg"]["effective_stack"],
+        straddle=data["cfg"].get("straddle"),
+        ante=data["cfg"].get("ante"),
+    )
+
+    # Preflop
+    pre_actions = [PreflopAction(**a) for a in data["pre"].get("trail_actions", [])]
+    pre = PreflopRecord(
+        opener=data["pre"]["opener"],
+        open_to=data["pre"].get("open_to", data["pre"].get("open_amount")),
+        trail_actions=pre_actions,
+    )
+
+    # Flop
+    flop_result = None
+    if data.get("flop"):
+        fr = data["flop"]
+        fr_actions = [StreetAction(**a) for a in fr.get("actions", [])]
+        flop_rec = FlopRecord(board=fr["board"], actions=fr_actions)
+        flop_result = Result(record=flop_rec, remaining_positions=fr.get("remaining_positions", []))
+
+    # Turn
+    turn_result = None
+    if data.get("turn"):
+        tr = data["turn"]
+        tr_actions = [StreetAction(**a) for a in tr.get("actions", [])]
+        turn_rec = TurnRecord(board=tr["card"], actions=tr_actions)
+        turn_result = Result(record=turn_rec, remaining_positions=tr.get("remaining_positions", []))
+
+    # River
+    river_result = None
+    if data.get("river"):
+        rr = data["river"]
+        rr_actions = [StreetAction(**a) for a in rr.get("actions", [])]
+        river_rec = RiverRecord(board=rr["card"], actions=rr_actions)
+        river_result = Result(
+            record=river_rec,
+            remaining_positions=rr.get("remaining_positions", []),
+            showdown_raw=rr.get("showdown_raw"),
+        )
+
+    return cfg, pre, flop_result, turn_result, river_result, data

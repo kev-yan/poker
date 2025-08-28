@@ -147,25 +147,25 @@ def main() -> None:
     cfg = collect_hand_config()
 
     print("\n=== Preflop ===")
-    pre = collect_preflop()
+    pre = collect_preflop(cfg)
 
     if pre.players_to_flop <= 1:
         print("\nHand ended preflop (no flop).")
         # Minimal RAG schema for preflop-only
-        rag = {
-            "title": "User-entered hand (preflop-only)",
-            "schema_string": f"{cfg.schema_tokens()} | preflop={pre.preflop_tokens}",
-            "embedding_text": f"{cfg.schema_tokens()}. Preflop: {pre.preflop_tokens}.",
-            "facets": {
-                "pot_type": pre.pot_type,
-                "players_to_flop": pre.players_to_flop,
-                "positions": participants_to_flop(pre),
-                "line_compact": pre.preflop_tokens,
-            },
-            "tokens": {"preflop": pre.preflop_tokens},
-        }
-        _emit(rag, "rag_preflop_only.json")
-        return
+        # rag = {
+        #     "title": "User-entered hand (preflop-only)",
+        #     "schema_string": f"{cfg.schema_tokens()} | preflop={pre.preflop_tokens}",
+        #     "embedding_text": f"{cfg.schema_tokens()}. Preflop: {pre.preflop_tokens}.",
+        #     "facets": {
+        #         "pot_type": pre.pot_type,
+        #         "players_to_flop": pre.players_to_flop,
+        #         "positions": participants_to_flop(pre),
+        #         "line_compact": pre.preflop_tokens,
+        #     },
+        #     "tokens": {"preflop": pre.preflop_tokens},
+        # }
+        # _emit(rag, "rag_preflop_only.json")
+        # return
 
     parts = participants_to_flop(pre)
     print("\n=== Flop ===")
@@ -200,8 +200,8 @@ def main() -> None:
 
     # 2) Enrich with LLM to align to your corpus facets (hero_hand_class, spr_bucket, tags, etc.)
     llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)  # or your preferred small-cot model
-    #enriched_query = enrich_user_hand_with_llm(llm, raw_query)
-    enriched_query = None
+    enriched_query = enrich_user_hand_with_llm(llm, raw_query, cfg)
+    #enriched_query = None
 
     headers = {"X-OpenAI-Api-Key": os.getenv("OPENAI_API_KEY")}
 
@@ -212,18 +212,17 @@ def main() -> None:
         skip_init_checks=True,
     )
 
-    # 3) Weaviate hybrid search (BM25 + dense) with safe hard_filters
-    # objects, debug = search_weaviate_hybrid(
-    #     client=client,                   # your weaviate client
-    #     collection_name="PokerHand",
-    #     enriched_query_doc=enriched_query,
-    #     top_k=3,
-    #     alpha=0.5,
-    #     embed_fn=embed
-    # )
+    #3) Weaviate hybrid search (BM25 + dense) with safe hard_filters
+    objects, debug = search_weaviate_hybrid(
+        client=client,                   # your weaviate client
+        collection_name="PokerHand",
+        enriched_query_doc=enriched_query,
+        top_k=3,
+        alpha=0.5,
+        embed_fn=embed
+    )
 
 # 4) Build a short NL summary of the user hand for the final coaching prompt
-    #nl_summary = summarize_user_hand_nl(cfg, enriched_query)
     nl_summary  = build_nl_summary(
         cfg=cfg,
         pre=pre,
@@ -232,31 +231,31 @@ def main() -> None:
         river_rec=river_result.record if river_result else None
     )
 
-    # fixture = serialize_hand_fixture(
-    #     cfg=cfg,
-    #     pre=pre,
-    #     flop_result=flop_result,
-    #     turn_result=turn_result,
-    #     river_result=river_result,
-    #     nl_summary=nl_summary,
-    #     raw_query=raw_query,
-    # )
-    # save_fixture(fixture)  # writes to data/test_fixtures/last_hand_fixture.json
+    fixture = serialize_hand_fixture(
+        cfg=cfg,
+        pre=pre,
+        flop_result=flop_result,
+        turn_result=turn_result,
+        river_result=river_result,
+        nl_summary=nl_summary,
+        raw_query=raw_query,
+    )
+    save_fixture(fixture)  # writes to data/test_fixtures/last_hand_fixture.json
 
     print("\n--- NL Summary ---")
     print(nl_summary)
 
     print("\n--- Query Doc (raw) ---")
     print(json.dumps(raw_query, indent=2))
-    # print("\n--- Enriched Query Doc ---")
-    # print(json.dumps(enriched_query, indent=2))
-    # print("\n--- Hybrid search debug ---")
-    # print(json.dumps(debug, indent=2))
-    # print("\n--- Retrieved titles ---")
-    # for o in objects:
-    #     title = o.properties.get("title")
-    #     score = getattr(o.metadata, "score", None)
-    #     print(f"{score:.3f}  {title}")
+    print("\n--- Enriched Query Doc ---")
+    print(json.dumps(enriched_query, indent=2))
+    print("\n--- Hybrid search debug ---")
+    print(json.dumps(debug, indent=2))
+    print("\n--- Retrieved titles ---")
+    for o in objects:
+        title = o.properties.get("title")
+        score = getattr(o.metadata, "score", None)
+        print(f"{score:.3f}  {title}")
     client.close()
     # print("\n--- RAW RAG Schema (FINAL) ---")
     # print(raw_query)

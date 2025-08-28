@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 from typing import Callable, List, Optional
 
 from utils.game_flow import GameFlow, POS_9MAX
+from utils.hand_input import HandConfig
 
 # ---------- Data models ----------
 @dataclass(frozen=True)
@@ -18,14 +19,29 @@ class PreflopRecord:
     opener: str
     open_to: float
     trail_actions: List[PreflopAction] = field(default_factory=list)
+    bb: float = 0.0
+    straddle: float = 0.0
+
+    @property
+    def _first_to_call(self) -> float:
+        # Price to call preflop is straddle (if present) else BB
+        return self.straddle if self.straddle and self.straddle > 0 else self.bb
+
+    @property
+    def opener_raised(self) -> bool:
+        # Limp if open_to == to_call; raise only if strictly greater
+        return self.open_to > self._first_to_call
 
     @property
     def raises_count(self) -> int:
-        return 1 + sum(1 for a in self.trail_actions if a.action == "raise")
+        return (1 if self.opener_raised else 0) + sum(
+            1 for a in self.trail_actions if a.action == "raise"
+        )
 
     @property
     def pot_type(self) -> str:
         rc = self.raises_count
+        if rc == 0: return "limped"
         if rc == 1: return "single-raised"
         if rc == 2: return "3-bet"
         if rc == 3: return "4-bet"
@@ -45,15 +61,22 @@ class PreflopRecord:
     @property
     def preflop_tokens(self) -> str:
         """
-        Position-aware compact schema (no dollar amounts) for retrieval:
-        e.g., 'UTG2:open | CO:3bet | BTN:call | UTG2:call'
+        If opener limps, the first subsequent raise is the 'open' (not a 3-bet).
         """
-        parts: List[str] = [f"{self.opener}:open"]
-        raise_num = 0
+        parts: List[str] = [f"{self.opener}:{'open' if self.opener_raised else 'limp'}"]
+        raise_i = 0
         for a in self.trail_actions:
             if a.action == "raise":
-                raise_num += 1
-                lbl = "3bet" if raise_num == 1 else ("4bet" if raise_num == 2 else "xbet")
+                raise_i += 1
+                if self.opener_raised:
+                    # opener raised → first re-raise is 3-bet
+                    lbl = "3bet" if raise_i == 1 else ("4bet" if raise_i == 2 else "xbet")
+                else:
+                    # opener limped → first raise is the 'open', then 3-bet, 4-bet, ...
+                    lbl = ("open" if raise_i == 1 else
+                           "3bet" if raise_i == 2 else
+                           "4bet" if raise_i == 3 else
+                           "xbet")
                 parts.append(f"{a.position}:{lbl}")
             elif a.action == "call":
                 parts.append(f"{a.position}:call")
@@ -62,8 +85,11 @@ class PreflopRecord:
         return " | ".join(parts)
 
     def pretty(self) -> str:
-        """Readable transcript for the CLI."""
-        lines = [f"{self.opener} raises to ${_trim(self.open_to)}"]
+        lines: List[str] = []
+        if self.opener_raised:
+            lines.append(f"{self.opener} raises to ${_trim(self.open_to)}")
+        else:
+            lines.append(f"{self.opener} limps")
         for a in self.trail_actions:
             if a.action == "raise":
                 lines.append(f"{a.position} raises to ${_trim(a.amount or 0.0)}")
@@ -73,7 +99,6 @@ class PreflopRecord:
                 lines.append(f"{a.position} folds")
         lines.append(f"\n{self.players_to_flop} players to the flop")
         return "\n".join(lines)
-
 # ---------- Round tracker ----------
 class PreflopTracker:
     """
@@ -82,11 +107,16 @@ class PreflopTracker:
       - Auto-folds skipped seats, but only logs a 'fold' if that seat had voluntarily invested.
       - Prevents finishing the round while players still owe action.
     """
-    def __init__(self, gf: GameFlow, opener: str):
+
+    def __init__(self, gf: GameFlow, opener: str, cfg: HandConfig):
         self.gf = gf
         self.opener = opener
         self.last_actor = opener
         self.last_aggressor = opener
+        self.sb = cfg.stakes_sb
+        self.bb = cfg.stakes_bb
+        self.straddle = cfg.straddle if hasattr(cfg, "straddle") else 0.0
+        self.effective_stack = cfg.effective_stack if hasattr(cfg, "effective_stack") else 0.0
 
         # Only the opener has voluntarily invested initially (NOT the blinds).
         self.invested: set[str] = {opener}
@@ -142,9 +172,11 @@ class PreflopTracker:
 
 # ---------- Public intake ----------
 def collect_preflop(
+    cfg: HandConfig,
     input_fn: Callable[[str], str] = input,
     print_fn: Callable[[str], None] = print,
 ) -> PreflopRecord:
+    #tracker = PreflopTracker(cfg)
     gf = GameFlow()
 
     print_fn("--PreFlop--")
@@ -152,9 +184,10 @@ def collect_preflop(
     opener = _ask_position("Where did action start?", gf, input_fn, print_fn)
     gf.set_action_start(opener)
 
-    open_to = _ask_money("How much did they bet? (e.g. $10 or 6.5)", input_fn, print_fn)
+    tracker = PreflopTracker(gf, opener, cfg)
 
-    tracker = PreflopTracker(gf, opener)
+    open_to = _ask_money("How much did they bet? (e.g. $10 or enter big blind amount if limped)", input_fn, print_fn)
+
     actions: List[PreflopAction] = []
 
     # Continue until no one owes action
@@ -183,10 +216,18 @@ def collect_preflop(
             tracker.on_call(next_pos)
         else:
             amount = act  # float
-            actions.append(PreflopAction(position=next_pos, action="raise", amount=amount))
-            tracker.on_raise(next_pos)
+            # Treat as 'call' if raise amount equals the big blind (or straddle)
+            if amount == tracker.bb or (amount == tracker.straddle and tracker.straddle > 0):
+                actions.append(PreflopAction(position=next_pos, action="call"))
+                tracker.on_call(next_pos)
+            elif amount < tracker.bb:
+                print_fn(f"Amount raised ({amount}) is less than the big blind ({tracker.bb}). Please try again.")
+                continue
+            else:
+                actions.append(PreflopAction(position=next_pos, action="raise", amount=amount))
+                tracker.on_raise(next_pos)
 
-    record = PreflopRecord(opener=opener, open_to=open_to, trail_actions=actions)
+    record = PreflopRecord(opener=opener, open_to=open_to, trail_actions=actions, bb=tracker.bb, straddle=tracker.straddle)
 
     # Summary for CLI
     print_fn("")
