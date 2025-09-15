@@ -381,56 +381,93 @@ def enrich_user_hand_with_llm(llm, raw_doc: dict, cfg) -> dict:
 # --------------------------
 # 3) Weaviate hybrid search helper
 # --------------------------
+
+# Properties to return with each hit (aligns with your updated collection)
+RETURN_PROPS = [
+    "annotated_coaching_description", "blocker_pattern", "board_texture",
+    "embedding_text", "flush_level", "heads_up", "hero_hand_class", "hero_position",
+    "high_card_bucket", "line_compact", "paired_level", "pot_type", "schema_string",
+    "spr_bucket", "stack_depth", "straightness", "street_focus", "tags",
+    "texture_class", "title", "villain_position", "players_to_flop", "positions", "line_tokens",
+    "improvement_flags", "action_points",
+]
+
+# TAGS get the highest weight; others help rank within the candidate set.
+TAGS_FIRST_QUERY_PROPS = [
+    "tags^4",
+    "improvement_flags^4",
+    "line_compact",
+    "schema_string",
+    "texture_class^2",
+    "hero_hand_class^2",
+    "board_texture^2",
+    "spr_bucket",
+    "stack_depth",
+    "positions",
+    "line_tokens",
+    "embedding_text",
+]
+
 from weaviate.classes.query import Filter
 def search_weaviate_hybrid(
     client,
     collection_name: str,
     enriched_query_doc: Dict[str, Any],
-    top_k: int = 8,
-    alpha: float = 0.5,
-    return_props: Optional[List[str]] = None,
-    embed_fn: Callable[[str], List[float]] = None,
+    top_k: int = 12,
+    alpha: float = 0.45,
+    embed_fn: Optional[Callable[[str], List[float]]] = None,
+    query_properties: Optional[List[str]] = None,  # override weights if desired
 ) -> Tuple[List[Any], Dict[str, Any]]:
+    """
+    Tags-first hybrid search:
+      - Tags are NOT required (no must_tags), but they carry the most weight.
+      - Light hard filters only if present in enriched_query_doc['hard_filters'].
+      - tags/improvement_flags/line_tokens are appended to query text for soft boosting.
+
+    Expects enriched_query_doc keys:
+      - 'embedding_text' (str)
+      - optionally 'hard_filters' (dict: e.g., {'street_focus': 'river'})
+      - optionally 'tags', 'improvement_flags', 'line_tokens'
+    """
     col = client.collections.get(collection_name)
 
-    query_text = enriched_query_doc["embedding_text"]
-    hf = enriched_query_doc.get("hard_filters") or {}
+    # 1) Build query text (soft-boost tags/flags/tokens)
+    query_text = (enriched_query_doc.get("embedding_text") or "").strip()
+    boost_tokens = []
+    for k in ("tags", "improvement_flags", "line_tokens"):
+        vals = enriched_query_doc.get(k) or enriched_query_doc.get("soft_signals", {}).get(k)
+        if vals:
+            boost_tokens.extend([str(v) for v in vals if v])
+    if boost_tokens:
+        query_text = f"{query_text}\nkeywords: " + " ".join(sorted(set(boost_tokens)))
 
-    # Build simple AND filter for equality keys
-    flt = None
-    if hf:
-        for k, v in hf.items():
-            f = Filter.by_property(k).equal(v)
-            flt = f if flt is None else (flt & f)
+    # 2) Optional dense vector
+    vec = embed_fn(query_text) if embed_fn else None
 
-    props = return_props or [
-        "title", "schema_string", "embedding_text", "annotated_coaching_description",
-        "pot_type", "texture_class", "tags", "line_compact"
-    ]
-
-    vec = None
-    if embed_fn is not None:
-        vec = embed_fn(query_text)
-        # Optional sanity check:
-        if hasattr(vec, "__len__"):
-            assert len(vec) == 384, f"Expected 384-D, got {len(vec)}"
-
+    # 3) Hard filters (light + optional)
     hf = _sanitize_hard_filters(enriched_query_doc.get("hard_filters"))
-    flt = None
-    for k, v in hf.items():
-        f = Filter.by_property(k).equal(v)
-        flt = f if flt is None else (flt & f)
+    where = _build_where(hf)
 
+    # 4) Hybrid query with property weights
     resp = col.query.hybrid(
-        query=query_text,               # BM25 side
-        vector=vec,                     # dense side (384-D)
-        alpha=alpha,                    # blend
+        query=query_text,
+        vector=vec,
+        alpha=alpha,
         limit=top_k,
-        filters=flt,
-        return_metadata=["score", "distance"],   # valid metadata keys
-        return_properties=props,
+        filters=where,
+        query_properties=query_properties or TAGS_FIRST_QUERY_PROPS,
+        return_properties=RETURN_PROPS,
+        return_metadata=MetadataQuery(score=True, distance=True),
     )
-    return resp.objects, {"alpha": alpha, "hard_filters": hf, "query_text": query_text}
+
+    debug = {
+        "alpha": alpha,
+        "hard_filters": hf,
+        "query_properties": query_properties or TAGS_FIRST_QUERY_PROPS,
+        "appended_keywords": sorted(set(boost_tokens)),
+        "query_text_preview": query_text[:240],
+    }
+    return resp.objects, debug
 
 
 # --------------------------
@@ -464,10 +501,14 @@ def build_nl_summary(cfg, pre, flop_rec=None, turn_rec=None, river_rec=None) -> 
 # Internals
 # --------------------------
 
-def _sanitize_hard_filters(hard_filters: dict | None) -> dict:
-    if not hard_filters:
+def _sanitize_hard_filters(hf: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    if not hf:
         return {}
-    return {k: v for k, v in hard_filters.items() if v not in (None, "", [], {})}
+    out = {k: v for k, v in hf.items() if v not in (None, "", [], {})}
+    # Coherence: if heads_up is true and players_to_flop missing, set 2
+    if out.get("heads_up") is True and "players_to_flop" not in out:
+        out["players_to_flop"] = 2
+    return out
 
 
 def _safe_schema_tokens(cfg) -> str:
@@ -617,3 +658,12 @@ def _fmt_board(board: str | None) -> str:
     if not board:
         return "?"
     return " ".join(board[i:i+2] for i in range(0, len(board), 2))
+
+def _build_where(hf: Dict[str, Any]) -> Optional[Filter]:
+    if not hf:
+        return None
+    where = None
+    for k, v in hf.items():
+        f = Filter.by_property(k).equal(v)
+        where = f if where is None else (where & f)
+    return where
