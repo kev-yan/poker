@@ -1,5 +1,9 @@
 import json
 from pathlib import Path
+import os
+import sys
+from workflows import run_workflow_from_new_hand
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from utils.io_helpers import load_data, save_data
 from utils.format import format_hand_for_llm
 from llm.prompts import generate_coaching_feedback
@@ -56,12 +60,14 @@ def main():
     print("Welcome to the Poker Coach CLI")
     while True:
         print("\nOptions:")
-        print("1. View Sample Hand")
-        print("2. Input New Hand Data")
+        print("1. Input New Hand Data")
+        print("2. View Previous Hand")
         print("3. Exit")
 
         choice = input("\nChoose an option (1-3): ")
         if choice == '1':
+            run_workflow_from_new_hand()
+        elif choice == '2':
             try:
                 hand = load_data(DATA_PATH)
                 formatted_hand = format_hand_for_llm(hand)
@@ -77,8 +83,6 @@ def main():
                 print("Sample hand data not found. Please ensure the file exists.")
             except json.JSONDecodeError:
                 print("Error decoding the sample hand data. Please check the file format.")
-        elif choice == '2':
-            print("This feature is not yet implemented. Please check back later.")
         elif choice == '3':
             print("Exiting the Poker Coach CLI. Goodbye!")
             break
