@@ -81,14 +81,6 @@ def build_final_rag_schema(
         "straightness_runout": runout["straightness_runout"],
         "runout_texture_class": runout["runout_texture_class"],
     }
-
-    # schema_string = (
-    #     f"{_safe_schema_tokens(cfg)} "
-    #     f"| preflop={tokens['preflop']}"
-    #     + (f" | flop={tokens['flop']}" if 'flop' in tokens else "")
-    #     + (f" | turn={tokens['turn']}" if 'turn' in tokens else "")
-    #     + (f" | river={tokens['river']}" if 'river' in tokens else "")
-    # )
     schema_string = _safe_schema_tokens(cfg)
 
     pieces = [
@@ -139,303 +131,248 @@ def build_final_rag_schema(
 # 2) LLM enrichment: map user doc -> corpus facet schema
 # --------------------------
 
-ALLOWED_TOP_KEYS = {
-    "title", "schema_string", "embedding_text",
-    "facets", "hard_filters", "soft_signals",
-    "rule_features", "tags"
-}
 
 def enrich_user_hand_with_llm(llm, raw_doc: dict, cfg) -> dict:
     """
-    Produce a RAG-ready JSON (exact shape from your prompt).
-    - Uses LLM to normalize & infer missing facets.
-    - Merges in deterministic features from raw_doc.
-    - Returns ONLY the keys defined by the prompt (no extras).
+    Produce a RAG-ready JSON by calling an LLM with a compact system prompt
+    + structured output (JSON Schema with enums). No post normalizer/validator here.
     """
 
-    #REMOVED: Do not mention specific hole cards or suits when describing the hand unless the inclusion of specific cards will help convey the concept more evidently. Focus on the spot, not the result.
-    # ----- 1) Your exact instructions as system prompt -----
-    system = (
-        """
-        You are a Poker strategy assistant that converts short, summarized hand review segments from a hand into a RAG‑ready JSON. Output must be valid JSON only. Your job is to:
-        Produce a compact, normalized schema string that captures the strategic spot.
-        Emit facets for filtering and reranking, using the controlled vocabularies below.
-        Generate a clean embedding_text that combines the schema string and the annotated coaching description.
-        Add rule_features for a lightweight, poker‑aware reranker.
-        Separate hard_filters from soft_signals so the retriever can do graduated backoff.
-        CRITICAL (internal reasoning only): You are given the hero’s exact hand and the board cards in `private_hints`.
-        Use them solely to infer `hero_hand_class` and `blocker_pattern`. Think step-by-step **internally**; do NOT reveal your reasoning or the exact cards. Output VALID JSON only.
+    # -----------------------------
+    # 0) Build inputs for the call
+    # -----------------------------
 
-        Street focus
-        - Classify on ONE street: river if present, else turn, else flop, unless a specific street is explicitly called out.
-
-        Internal decision cascade (stop at the first match on the chosen street)
-        Assemble the best 5-card hand from hero’s 2 cards + the board.
-        1) Straight-flush (royal flush is a special case of straight-flush) – five in sequence, all same suit. Label as `"straight-flush"`.
-        2) Quads – four of a kind.
-        3) Full house – any three-of-a-kind + any pair.
-        4) Flush – five to the same suit.
-        5) Straight – five in sequence; allow A-5 wheel.
-        6) Set – pocket pair matching exactly one board rank (not trips from board alone).
-        7) Two-pair – two distinct ranks paired (hole+board or board+board+hole).
-        8) Overpair – pocket pair strictly higher than **all** board ranks.
-        9) Underpair – pocket pair lower than the **highest** board rank and not present on the board.
-        10) Top-pair – one hole equals the highest distinct board rank.
-        11) Second-pair – one hole equals the second-highest distinct board rank.
-        12) Weak-pair – one hole equals a lower distinct board rank (3rd+).
-        13) Draw – ONLY if none above applies (e.g., 4-flush, OESD, gutshot)(MUST BE BEFORE THE RIVER).
-        14) Air – none of the above.
-
-        Disambiguation / fail-safes
-        - Never assign **overpair** unless it strictly meets the definition. If unsure between overpair and under/second/weak-pair, choose the latter.
-        - If both a made hand and a draw exist, choose the higher category from the cascade.
-        - `"bluff-catcher"` is for river-only, marginal one-pair spots in clearly polar situations; otherwise use the structural class.
-
-        Blockers
-        - Monotone or 4-flush runouts + hero holds the Ace of that suit → `blocker_pattern="flush_blocker"`.
-        - Highly connected/broadway boards with hero removing common straights → `blocker_pattern="broadway_blocker"`.
-        - Hero blocks the nut straight with key ranks → `blocker_pattern="straight_blocker"`.
-        - Else, null.
-
-        Privacy
-        - Do not echo ranks/suits in the output—only derived labels (e.g., `"overpair"`, `"second-pair"`, `"straight-flush"`, `"flush_blocker"`).
-
-        Vocabulary alignment
-        - `hero_hand_class` must be one of:
-        ["air","draw","weak-pair","second-pair","top-pair","overpair","underpair",
-        "two-pair","set","straight","flush","full house","quads","straight-flush","bluff-catcher"].
-
-        Controlled vocabularies
-        pot_type: single-raised, 3-bet, 4-bet, limped, multiway, heads-up,straddle
-        positions (primary hero pos; villain optional): UTG, EP, MP, LJ, HJ, CO, BTN, SB, BB, straddle, BvB
-        street_events tokens (use any that apply, order by time):
-        open, call, 3bet, 4bet, c-bet, delayed-cbet, donk, check-raise, float, probe, barrel, overbet, jam, min-raise, x, bet-small, bet-mid, bet-big
-        board_texture: dry, two-tone, monotone, paired, paired+, draw-heavy, high-connect, low-connect, coordinated, rainbow
-        hero_hand_class: overpair, underpair, top-pair, second-pair, weak-pair, set, two-pair, trips, straight, flush, full house, quads, combo draw, flush draw, straight draw, gutshot, overcards, air, bluff-catcher
-        stack_dynamics: short, medium, deep, plus SPR<1, SPR~2, SPR~3-5, SPR>5
-        strategic_themes: thin value, exploit, GTO deviation, capped range attack, missed value, bluff catcher, indifferent, sizing tell, induce, deny equity, range advantage, story inconsistency, leveling,nit-villain, loose-villain,strong player, weak player, etc.
-        Derived board features
-        Compute coarse, integer features from the description. If unknown, infer from context or set null.
-        flush_level: 0–4 where 0 none, 3 three to a suit, 4 four to a suit or completed flush environment.
-        paired_level: 0 none, 1 one pair on board, 2 trips/paired+, 3 double-paired+.
-        straightness: 0 low, 1 some connectivity, 2 high connectivity.
-        high_card_bucket: H (A/K present), M (Q/J/T), L (<=9 focus).
-        texture_class: one of board_texture above that best summarizes the runout.
-        If the transcript indicates blockers, set blocker_pattern such as flush_blocker, straight_blocker, ace_blocker, broadway_blocker.
-        Output shape
-        Return one JSON object per video with exactly these keys:
-        json
-        Copy
-        {
-        "title": "string",
-        "schema_string": "single line, normalized tokens (from inputted schema_string)",
-        "embedding_text": "schema_string + hand recap (from inputted embedding_text)",
+    facets_in = raw_doc.get("facets", {}) or {}
+    derived_fields = {
         "facets": {
-            "pot_type": "single-raised|3-bet|4-bet|limped|multiway|heads-up",
-            "hero_position": "UTG|EP|...|BB|BvB",
-            "villain_position": "optional",
-            "heads_up": true,
-            "street_focus": "flop|turn|river|all",
-            "board_texture": "see vocab",
-            "flush_level": 0,
-            "paired_level": 0,
-            "straightness": 0,
-            "high_card_bucket": "H|M|L",
-            "texture_class": "see vocab",
-            "hero_hand_class": "see vocab",
-            "blocker_pattern": "string or null",
-            "spr_bucket": "SPR<1|SPR~2|SPR~3-5|SPR>5",
-            "stack_depth": "short|medium|deep",
-            "line_compact": "tokenized street_events, e.g., 'open call | c-bet call | barrel jam'",
-            "positions": ["hero", "villain", "others if relevant"]
-        },
-        "hard_filters": {
-            "pot_type": "value",
-            "street_focus": "value or null if not specific"
-        },
-        "soft_signals": {
-            "texture_class": "value",
-            "hero_hand_class": "value",
-            "spr_bucket": "value",
-            "line_tokens": ["c-bet","check-raise","barrel","jam"],
-            "heads_up": true
-        },
-        "rule_features": {
-            "board": { "texture_class": "value", "flush_level": 0, "paired_level": 0, "straightness": 0, "high_card_bucket": "H|M|L" },
-            "hero": { "hand_class": "value", "blocker_pattern": "value or null" },
-            "context": { "spr_bucket": "value", "position_primary": "hero_position", "line_compact": "same as facets.line_compact" }
-        },
-        "tags": ["comma style tags for UI and quick filters"],
+            "positions":      facets_in.get("positions"),
+            "line_compact":   facets_in.get("line_compact"),
+            "pot_type":       facets_in.get("pot_type"),
+            "heads_up":       facets_in.get("heads_up"),
+            "spr_bucket":     facets_in.get("spr_bucket"),
+            "stack_depth":    facets_in.get("stack_depth"),
+            "texture_class":  facets_in.get("texture_class"),
+            "flush_level":    facets_in.get("flush_level"),
+            "paired_level":   facets_in.get("paired_level"),
+            "straightness":   facets_in.get("straightness"),
+            "high_card_bucket": facets_in.get("high_card_bucket"),
+            "hero_position":  facets_in.get("hero_position"),
         }
+    }
 
-        Construction rules
-        schema_string is short and machine‑friendly. Example pattern:
-        pot=3-bet HU pos=BTN_vs_SB spr=~2 hero=overpair board=paired dry line=c-bet-call | barrel | river overbet
-        embedding_text = schema_string + hand summary from the perspective of the hero (include hero's actions, villains actions and board textures)
-        Prefer inference: if the board is monotone and the user contains the Ace of the suit on the board, set board_texture=monotone, flush_level>=3, blocker_pattern=flush_blocker, hero_hand_class=bluff-catcher if consistent. Do your best to infer these fields.
-        If the street focus is clearly about one decision point, set street_focus to that street, else all.
-        If info is missing, keep fields but set to "None" and avoid guessing wildly.
-        """
+    private_hints = {
+        "hero_hand":  getattr(cfg, "hero_hand", None),
+        "flop_board": facets_in.get("flop_board"),
+        "turn_card":  facets_in.get("turn_card"),
+        "river_card": facets_in.get("river_card"),
+    }
+
+    raw_min = {
+        "schema_string":  raw_doc.get("schema_string", ""),
+        "embedding_text": raw_doc.get("embedding_text", ""),
+        "facets":         facets_in,
+        "tokens":         raw_doc.get("tokens", {}),
+        "title":          raw_doc.get("title", "User-entered hand"),
+    }
+
+    # ---------------------------------
+    # 1) Compact system rules (prompt)
+    # ---------------------------------
+    system = (
+        "You are a poker strategy enricher. Output JSON only that conforms to the provided JSON Schema (PokerRAGEntry).\n"
+        "INPUTS in user message:\n"
+        "- DERIVED_FIELDS: objective truths computed upstream; copy verbatim and do NOT change.\n"
+        "- RAW_JSON: canonical user hand context.\n"
+        "- PRIVATE_HINTS: exact hole cards and board (for inference only; never reveal).\n\n"
+        "TASK: Produce schema_string, facets, hard_filters vs soft_signals, tags, and embedding_text.\n\n"
+        "GLOBAL RULES:\n"
+        "- JSON only; no prose outside fields. If unknown, set null.\n"
+        "- Never reveal exact cards/suits. Use concepts only.\n"
+        "- Use PRIVATE_HINTS only to infer hero_hand_class and blocker_pattern.\n"
+        "- Choose one street_focus (river > turn > flop unless the input says otherwise).\n"
+        "- Don't duplicate the betting line: keep canonical line in facets.line_compact; embedding_text may include it once.\n"
+        "- Keep values within schema enums; do not invent new tokens.\n\n"
+        "HAND CLASS (on chosen street) priority:\n"
+        "quads/full house/flush/straight > set > two-pair > overpair/underpair > top/second/weak-pair > draw > air.\n"
+        "Definitions (strict): overpair = pocket pair higher than all board ranks; underpair = lower than the highest board rank and not on board; "
+        "top/second/weak-pair = hole equals 1st/2nd/3rd+ highest distinct board rank; set = pocket pair matches a single board rank. "
+        "If unsure between over/underpair, prefer underpair unless the overpair condition is strictly met.\n\n"
+        "CONSTRUCTION:\n"
+        "- schema_string: short, normalized tokens (pot/formation/pos/SPR/hero/board). Avoid per-street prose.\n"
+        "- embedding_text: schema_string + one 'line=' from facets.line_compact + brief board features; no per-street narratives.\n"
+        "- hard_filters: minimally pot_type and street_focus when known.\n"
+        "- soft_signals: select 3–5 high-signal descriptors from the allowed improvement_flags list below; dedupe; also append to tags.\n\n"
+        "ALLOWED improvement_flags (use these exact tokens or come up with your own flags (but don't deviate too far from the original intent)):\n"
+        "A) dynamic_board, static_board, wet_board, dry_board, coordinated_high_connect, low_connect, monotone_pressure, two_tone_pressure, paired_board, paired_plus\n"
+        "B) turn_completes_flush, turn_completes_straight, turn_pairs_board, straightening_turn, river_pairs_top, river_pairs_low, four_flush_river, backdoor_flush_river, backdoor_straight_river, scare_card_river, brick_river\n"
+        "C) range_advantage_hero, nut_advantage_hero, range_advantage_villain, nut_advantage_villain, hero_IP, hero_OOP, multiway_pressure, blind_vs_blind\n"
+        "D) turned_top_pair_value, underpair_showdown_bound, overpair_marginal_board, bluff_catcher_river, flush_blocker_pressure, straight_blocker_pressure, broadway_blocker_pressure\n"
+        "E) small_cbet_range_node, polar_turn_barrel, delayed_cbet_viable, check_raise_dense, donk_represented, overbet_polar_node, thin_value_ok, cap_attack_spot, induce_vs_polar_line, minraise_strength_tell\n"
+        "F) pool_low_bluff, pool_calls_wide, strong_player_present, weak_player_target, sticky_pool, nit_villain\n"
+        "G) price_to_continue_good, fold_equity_low, deny_equity_priority, realization_penalty_OOP\n\n"
+        "VALIDATION:\n"
+        "- Do not alter DERIVED_FIELDS. Keep enums within schema vocab. If uncertain, set null."
     )
 
-
-    facets = raw_doc.get("facets", {})
-    fewshots = [
-        {
-            "input": {
-                "schema_string": "pot=3-bet pos=BB spr=~3 board=draw-heavy",
-                "embedding_text": "Preflop 3-bet, BB vs BTN. Flop is Q-high and connected. River checks through."
-            },
-            "private_hints": {
-                "hero_hand": "JhJd", "flop_board": "Qs7c3h", "turn_card": "2d", "river_card": "9s"
-            },
-            "expect": {
-                "facets.hero_hand_class": "underpair"
-            }
-        },
-        {
-            "input": {
-                "schema_string": "pot=single-raised pos=HJ spr=>5 board=dry",
-                "embedding_text": "Single-raised, HJ vs BB. Flop is T-high, dry."
-            },
-            "private_hints": {
-                "hero_hand": "JdJc", "flop_board": "Td4s2c", "turn_card": "7h", "river_card": "Qh"
-            },
-            "expect": {
-                "facets.hero_hand_class": "overpair"
-            }
-        },
-        {
-            "input": {"schema_string": "pot=single-raised pos=CO board=coordinated"},
-            "private_hints": {"hero_hand": "Qs9s", "flop_board": "KhQd7c", "turn_card": "2h", "river_card": "2c"},
-            "expect": {"facets.hero_hand_class": "second-pair"}
-        },
-        {
-            "input": {"schema_string": "pot=single-raised pos=BTN board=monotone"},
-            "private_hints": {"hero_hand": "AdKc", "flop_board": "5d9dQd", "turn_card": "2s", "river_card": "2c"},
-            "expect": {"facets.blocker_pattern": "flush_blocker"}
-        },
-        {
-            "input": {"schema_string": "pot=single-raised pos=BTN board=monotone"},
-            "private_hints": {"hero_hand": "Ah4h", "flop_board": "QhJh9h", "turn_card": "8d", "river_card": "2c"},
-            "expect": {"facets.blocker_pattern": "flush_blocker", "facets.hero_hand_class": "flush"}
-        },
-        {
-            "input": {"schema_string": "pot=single-raised pos=BTN board=monotone"},
-            "private_hints": {"hero_hand": "7h6d", "flop_board": "5h3d9s"},
-            "expect": {"facets.blocker_pattern": "flush_blocker", "facets.hero_hand_class": "GS"}
-        },
+    # ------------------------------------
+    # 2) JSON Schema with key enums (SO)
+    # ------------------------------------
+    POT_TYPES = ["limped", "single-raised", "3-bet", "4-bet", "5-bet", "6-bet", "7-bet", ">8-bet", None]
+    POSITIONS = ["UTG", "EP", "MP", "LJ", "HJ", "CO", "BTN", "SB", "BB", "BvB", "straddle", None]
+    TEXTURES  = ["dry", "paired", "monotone", "two-tone", "draw-heavy", "high-connect", "low-connect", "coordinated", "rainbow", None]
+    SPR_BUCKETS  = ["SPR<1", "SPR~2", "SPR~3-5", "SPR>5", None]
+    STACK_DEPTHS = ["short", "medium", "deep", None]
+    HIGH_BUCKETS = ["H", "M", "L", None]
+    STREET_FOCUS = ["flop", "turn", "river", "all", None]
+    HERO_HAND_CLASSES = [
+        "air","draw","weak-pair","second-pair","top-pair","overpair","underpair",
+        "two-pair","set","straight","flush","full house","quads","straight-flush","bluff-catcher", None
     ]
 
-    user_payload = {
-        "input": {
-            "schema_string": raw_doc.get("schema_string", ""),
-            "embedding_text": raw_doc.get("embedding_text", ""),
-            "facets": facets,                    # includes texture metrics you already computed
-            "tokens": raw_doc.get("tokens", {}), # preflop/flop/turn/river tokens if present
-        },
-        "private_hints": {
-            "hero_hand": getattr(cfg, "hero_hand", None),         # e.g., "QhJh"
-            "flop_board": facets.get("flop_board"),               # e.g., "9dQd2d"
-            "turn_card":  facets.get("turn_card"),                # e.g., "Tc"
-            "river_card": facets.get("river_card"),               # e.g., "9h"
-        },
-        "few_shots": fewshots,
-    }
-    # Constrain output with a JSON schema (enumerations keep it on-rails)
+    # exact improvement_flags list (verbatim)
+    IMPROVEMENT_FLAGS = [
+        # A) Board/texture nuance
+        "dynamic_board","static_board","wet_board","dry_board","coordinated_high_connect","low_connect",
+        "monotone_pressure","two_tone_pressure","paired_board","paired_plus",
+        # B) Runout events
+        "turn_completes_flush","turn_completes_straight","turn_pairs_board","straightening_turn",
+        "river_pairs_top","river_pairs_low","four_flush_river","backdoor_flush_river",
+        "backdoor_straight_river","scare_card_river","brick_river",
+        # C) Advantage / formation
+        "range_advantage_hero","nut_advantage_hero","range_advantage_villain","nut_advantage_villain",
+        "hero_IP","hero_OOP","multiway_pressure","blind_vs_blind",
+        # D) Hand-state & blockers
+        "turned_top_pair_value","underpair_showdown_bound","overpair_marginal_board","bluff_catcher_river",
+        "flush_blocker_pressure","straight_blocker_pressure","broadway_blocker_pressure",
+        # E) Line & sizing semantics
+        "small_cbet_range_node","polar_turn_barrel","delayed_cbet_viable","check_raise_dense",
+        "donk_represented","overbet_polar_node","thin_value_ok","cap_attack_spot",
+        "induce_vs_polar_line","minraise_strength_tell",
+        # F) Pool/opp tendencies
+        "pool_low_bluff","pool_calls_wide","strong_player_present","weak_player_target","sticky_pool","nit_villain",
+        # G) Pricing / equity realization
+        "price_to_continue_good","fold_equity_low","deny_equity_priority","realization_penalty_OOP"
+    ]
+
     response_schema = {
         "type": "json_schema",
         "json_schema": {
             "name": "PokerRAGEntry",
             "schema": {
                 "type": "object",
+                "additionalProperties": False,
                 "properties": {
                     "title": {"type": "string"},
                     "schema_string": {"type": "string"},
                     "embedding_text": {"type": "string"},
                     "facets": {
                         "type": "object",
+                        "additionalProperties": False,
                         "properties": {
-                            "pot_type": {"type": ["string", "null"]},
-                            "hero_position": {"type": ["string", "null"]},
-                            "villain_position": {"type": ["string", "null"]},
-                            "heads_up": {"type": ["boolean", "null"]},
-                            "street_focus": {"type": ["string", "null"], "enum": ["flop","turn","river","all", None]},
-                            "board_texture": {"type": ["string", "null"]},
-                            "flush_level": {"type": ["integer", "null"]},
-                            "paired_level": {"type": ["integer", "null"]},
-                            "straightness": {"type": ["integer", "null"]},
-                            "high_card_bucket": {"type": ["string", "null"], "enum": ["H","M","L", None]},
-                            "texture_class": {"type": ["string", "null"]},
-                            "hero_hand_class": {
-                                "type": ["string", "null"],
-                                "enum": [
-                                    "air","draw","weak-pair","second-pair","top-pair",
-                                    "overpair","underpair","two-pair","set","straight",
-                                    "flush","full house","quads","bluff-catcher", None
-                                ]
-                            },
+                            "pot_type":        {"type": ["string", "null"], "enum": POT_TYPES},
+                            "hero_position":   {"type": ["string", "null"], "enum": POSITIONS},
+                            "villain_position":{"type": ["string", "null"], "enum": POSITIONS},
+                            "heads_up":        {"type": ["boolean", "null"]},
+                            "players_to_flop": {"type": ["integer", "null"]},
+                            "street_focus":    {"type": ["string", "null"], "enum": STREET_FOCUS},
+                            "board_texture":   {"type": ["string", "null"], "enum": TEXTURES},
+                            "flush_level":     {"type": ["integer", "null"]},
+                            "paired_level":    {"type": ["integer", "null"]},
+                            "straightness":    {"type": ["integer", "null"]},
+                            "high_card_bucket":{"type": ["string", "null"], "enum": HIGH_BUCKETS},
+                            "texture_class":   {"type": ["string", "null"], "enum": TEXTURES},
+                            "hero_hand_class": {"type": ["string", "null"], "enum": HERO_HAND_CLASSES},
                             "blocker_pattern": {"type": ["string", "null"]},
-                            "spr_bucket": {"type": ["string", "null"]},
-                            "stack_depth": {"type": ["string", "null"], "enum": ["short","medium","deep", None]},
-                            "line_compact": {"type": ["string", "null"]},
-                            "positions": {"type": "array", "items": {"type": "string"}}
+                            "spr_bucket":      {"type": ["string", "null"], "enum": SPR_BUCKETS},
+                            "stack_depth":     {"type": ["string", "null"], "enum": STACK_DEPTHS},
+                            "line_compact":    {"type": ["string", "null"]},
+                            "positions":       {"type": "array", "items": {"type": "string"}}
                         },
                         "required": ["positions", "line_compact"]
                     },
                     "hard_filters": {"type": "object"},
-                    "soft_signals": {"type": "object"},
-                    "rule_features": {"type": "object"},
+                    "soft_signals": {
+                        "type": "object",
+                        "additionalProperties": True,
+                        "properties": {
+                            "texture_class":  {"type": ["string","null"], "enum": TEXTURES},
+                            "hero_hand_class":{"type": ["string","null"], "enum": HERO_HAND_CLASSES},
+                            "spr_bucket":     {"type": ["string","null"], "enum": SPR_BUCKETS},
+                            "line_tokens":    {"type": "array", "items": {"type": "string"}},
+                            "heads_up":       {"type": ["boolean","null"]},
+                            # exact allowed improvement flags:
+                            "improvement_flags": {"type": "array", "items": {"type": "string", "enum": IMPROVEMENT_FLAGS}}
+                        }
+                    },
                     "tags": {"type": "array", "items": {"type": "string"}}
                 },
-                "required": ["title","schema_string","embedding_text","facets","hard_filters","soft_signals","rule_features","tags"],
-                "additionalProperties": False
+                "required": [
+                    "title","schema_string","embedding_text","facets",
+                    "hard_filters","soft_signals","tags"
+                ]
             }
         }
     }
 
+    # -----------------------------
+    # 3) Build user message payload
+    # -----------------------------
+    user_payload = {
+        "DERIVED_FIELDS": derived_fields,
+        "RAW_JSON": raw_min,
+        "PRIVATE_HINTS": private_hints,
+    }
+
+    # -----------------------------
+    # 4) Invoke LLM (structured out)
+    # -----------------------------
     resp = llm.invoke(
         [
             {"role": "system", "content": system},
             {"role": "user", "content": json.dumps(user_payload)}
         ],
         response_format=response_schema,
-        #temperature=0,
     )
 
-    # Parse & light normalization (no deterministic overrides)
+    # -----------------------------
+    # 5) Parse & light backfill only
+    # -----------------------------
     content = getattr(resp, "content", resp)
     try:
-        enriched = json.loads(content) if isinstance(content, str) else json.loads(content or "{}")
+        enriched = json.loads(content) if isinstance(content, str) else (content if isinstance(content, dict) else {})
     except Exception:
         enriched = {}
 
-    enriched = {k: v for k, v in enriched.items() if k in ALLOWED_TOP_KEYS}
+    # Ensure top-level keys exist
     enriched.setdefault("title", raw_doc.get("title", "User-entered hand"))
     enriched.setdefault("schema_string", raw_doc.get("schema_string", ""))
     enriched.setdefault("embedding_text", raw_doc.get("embedding_text", ""))
     enriched.setdefault("facets", {})
     enriched.setdefault("hard_filters", {})
     enriched.setdefault("soft_signals", {})
-    enriched.setdefault("rule_features", {})
+    #enriched.setdefault("rule_features", {})
     enriched.setdefault("tags", [])
 
-    # (Optional but harmless) backfill neutral fields from raw_doc if missing
-    f = enriched["facets"]
-    for k in ["positions","line_compact","pot_type","stack_depth","texture_class",
-              "board_texture","flush_level","paired_level","straightness","high_card_bucket",
-              "flop_board","turn_card","river_card"]:
+    # Backfill obvious facet fields from raw if model left them null
+    f = enriched["facets"] or {}
+    for k in [
+        "positions","line_compact","pot_type","stack_depth","texture_class","board_texture",
+        "flush_level","paired_level","straightness","high_card_bucket","heads_up",
+        "flop_board","turn_card","river_card","spr_bucket","hero_position","villain_position"
+    ]:
         if f.get(k) in (None, "", [], {}):
-            val = facets.get(k)
+            val = facets_in.get(k)
             if val is not None:
                 f[k] = val
+    enriched["facets"] = f
 
-    # Hard filters: avoid nulls (this prevents your previous GRPC “unknown value type <nil>” error)
-    hf = enriched["hard_filters"]
+    # Minimal hard_filters fill (no nulls)
+    hf = enriched["hard_filters"] or {}
     if f.get("pot_type"):
         hf["pot_type"] = f["pot_type"]
     if f.get("street_focus") in ("flop","turn","river"):
         hf["street_focus"] = f["street_focus"]
+    enriched["hard_filters"] = hf
 
     return enriched
 
@@ -444,56 +381,93 @@ def enrich_user_hand_with_llm(llm, raw_doc: dict, cfg) -> dict:
 # --------------------------
 # 3) Weaviate hybrid search helper
 # --------------------------
+
+# Properties to return with each hit (aligns with your updated collection)
+RETURN_PROPS = [
+    "annotated_coaching_description", "blocker_pattern", "board_texture",
+    "embedding_text", "flush_level", "heads_up", "hero_hand_class", "hero_position",
+    "high_card_bucket", "line_compact", "paired_level", "pot_type", "schema_string",
+    "spr_bucket", "stack_depth", "straightness", "street_focus", "tags",
+    "texture_class", "title", "villain_position", "players_to_flop", "positions", "line_tokens",
+    "improvement_flags", "action_points",
+]
+
+# TAGS get the highest weight; others help rank within the candidate set.
+TAGS_FIRST_QUERY_PROPS = [
+    "tags^4",
+    "improvement_flags^4",
+    "line_compact",
+    "schema_string",
+    "texture_class^2",
+    "hero_hand_class^2",
+    "board_texture^2",
+    "spr_bucket",
+    "stack_depth",
+    "positions",
+    "line_tokens",
+    "embedding_text",
+]
+
 from weaviate.classes.query import Filter
 def search_weaviate_hybrid(
     client,
     collection_name: str,
     enriched_query_doc: Dict[str, Any],
-    top_k: int = 8,
-    alpha: float = 0.5,
-    return_props: Optional[List[str]] = None,
-    embed_fn: Callable[[str], List[float]] = None,
+    top_k: int = 12,
+    alpha: float = 0.45,
+    embed_fn: Optional[Callable[[str], List[float]]] = None,
+    query_properties: Optional[List[str]] = None,  # override weights if desired
 ) -> Tuple[List[Any], Dict[str, Any]]:
+    """
+    Tags-first hybrid search:
+      - Tags are NOT required (no must_tags), but they carry the most weight.
+      - Light hard filters only if present in enriched_query_doc['hard_filters'].
+      - tags/improvement_flags/line_tokens are appended to query text for soft boosting.
+
+    Expects enriched_query_doc keys:
+      - 'embedding_text' (str)
+      - optionally 'hard_filters' (dict: e.g., {'street_focus': 'river'})
+      - optionally 'tags', 'improvement_flags', 'line_tokens'
+    """
     col = client.collections.get(collection_name)
 
-    query_text = enriched_query_doc["embedding_text"]
-    hf = enriched_query_doc.get("hard_filters") or {}
+    # 1) Build query text (soft-boost tags/flags/tokens)
+    query_text = (enriched_query_doc.get("embedding_text") or "").strip()
+    boost_tokens = []
+    for k in ("tags", "improvement_flags", "line_tokens"):
+        vals = enriched_query_doc.get(k) or enriched_query_doc.get("soft_signals", {}).get(k)
+        if vals:
+            boost_tokens.extend([str(v) for v in vals if v])
+    if boost_tokens:
+        query_text = f"{query_text}\nkeywords: " + " ".join(sorted(set(boost_tokens)))
 
-    # Build simple AND filter for equality keys
-    flt = None
-    if hf:
-        for k, v in hf.items():
-            f = Filter.by_property(k).equal(v)
-            flt = f if flt is None else (flt & f)
+    # 2) Optional dense vector
+    vec = embed_fn(query_text) if embed_fn else None
 
-    props = return_props or [
-        "title", "schema_string", "embedding_text", "annotated_coaching_description",
-        "pot_type", "texture_class", "tags", "line_compact"
-    ]
-
-    vec = None
-    if embed_fn is not None:
-        vec = embed_fn(query_text)
-        # Optional sanity check:
-        if hasattr(vec, "__len__"):
-            assert len(vec) == 384, f"Expected 384-D, got {len(vec)}"
-
+    # 3) Hard filters (light + optional)
     hf = _sanitize_hard_filters(enriched_query_doc.get("hard_filters"))
-    flt = None
-    for k, v in hf.items():
-        f = Filter.by_property(k).equal(v)
-        flt = f if flt is None else (flt & f)
+    where = _build_where(hf)
 
+    # 4) Hybrid query with property weights
     resp = col.query.hybrid(
-        query=query_text,               # BM25 side
-        vector=vec,                     # dense side (384-D)
-        alpha=alpha,                    # blend
+        query=query_text,
+        vector=vec,
+        alpha=alpha,
         limit=top_k,
-        filters=flt,
-        return_metadata=["score", "distance"],   # valid metadata keys
-        return_properties=props,
+        filters=where,
+        query_properties=query_properties or TAGS_FIRST_QUERY_PROPS,
+        return_properties=RETURN_PROPS,
+        return_metadata=MetadataQuery(score=True, distance=True),
     )
-    return resp.objects, {"alpha": alpha, "hard_filters": hf, "query_text": query_text}
+
+    debug = {
+        "alpha": alpha,
+        "hard_filters": hf,
+        "query_properties": query_properties or TAGS_FIRST_QUERY_PROPS,
+        "appended_keywords": sorted(set(boost_tokens)),
+        "query_text_preview": query_text[:240],
+    }
+    return resp.objects, debug
 
 
 # --------------------------
@@ -527,10 +501,14 @@ def build_nl_summary(cfg, pre, flop_rec=None, turn_rec=None, river_rec=None) -> 
 # Internals
 # --------------------------
 
-def _sanitize_hard_filters(hard_filters: dict | None) -> dict:
-    if not hard_filters:
+def _sanitize_hard_filters(hf: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    if not hf:
         return {}
-    return {k: v for k, v in hard_filters.items() if v not in (None, "", [], {})}
+    out = {k: v for k, v in hf.items() if v not in (None, "", [], {})}
+    # Coherence: if heads_up is true and players_to_flop missing, set 2
+    if out.get("heads_up") is True and "players_to_flop" not in out:
+        out["players_to_flop"] = 2
+    return out
 
 
 def _safe_schema_tokens(cfg) -> str:
@@ -680,3 +658,12 @@ def _fmt_board(board: str | None) -> str:
     if not board:
         return "?"
     return " ".join(board[i:i+2] for i in range(0, len(board), 2))
+
+def _build_where(hf: Dict[str, Any]) -> Optional[Filter]:
+    if not hf:
+        return None
+    where = None
+    for k, v in hf.items():
+        f = Filter.by_property(k).equal(v)
+        where = f if where is None else (where & f)
+    return where
