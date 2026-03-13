@@ -1,0 +1,84 @@
+{
+  "stakes": "5/5",
+  "players": 6,
+  "hero": {
+    "position": "HJ",
+    "hand": ["Kc", "Js"]
+  },
+  "preflop": {
+    "actions": [
+      {"player": "Hero", "action": "Raise to $20"},
+      {"player": "SB", "action": "Call"}
+    ],
+    "pot": 45,
+    "coaching": null,
+    "metadata": {
+      "street": "preflop",
+      "hero_position": "HJ",
+      "hero_action": "Raise",
+      "facing_action": "Unopened",
+      "vs_position": "SB"
+    }
+  },
+  "flop": {
+    "board": ["Th", "9c", "4s"],
+    "actions": [
+      {"player": "SB", "action": "Check"},
+      {"player": "Hero", "action": "Bet $20"},
+      {"player": "SB", "action": "Call"}
+    ],
+    "pot": 85,
+    "coaching": null,
+    "metadata": {
+      "street": "flop",
+      "board_texture": "T9x rainbow",
+      "hero_action": "C-bet 1/2 pot",
+      "facing_action": "Check",
+      "multiway": false,
+      "position": "IP"
+    }
+  },
+  "turn": {
+    "card": "Jc",
+    "actions": [
+      {"player": "SB", "action": "Check"},
+      {"player": "Hero", "action": "Bet $55"},
+      {"player": "SB", "action": "Call"}
+    ],
+    "pot": 195,
+    "coaching": "This is one of these ones where it's a stake dependent type of situation...",
+    "metadata": {
+      "street": "turn",
+      "turn_card": "Jc",
+      "board_texture": "T9J two-tone",
+      "hero_action": "Value bet",
+      "facing_action": "Check",
+      "position": "IP"
+    }
+  },
+  "river": {
+    "card": "9s",
+    "actions": [
+      {"player": "SB", "action": "Check"},
+      {"player": "Hero", "action": "Check"}
+    ],
+    "coaching": null,
+    "metadata": {
+      "street": "river",
+      "river_card": "9s",
+      "board_texture": "T9J9",
+      "hero_action": "Check",
+      "facing_action": "Check",
+      "position": "IP"
+    }
+  },
+  "result": {
+    "showdown_occurred": true,
+    "hero_action": "Check",
+    "villain_showdowns": {
+      "SB": ["Kd", "Td"]
+    }
+  },
+  "notes": "",
+  "source": "https://www.instagram.com/p/DMbAcrfOwCM/"
+}
