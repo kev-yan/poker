@@ -1,16 +1,30 @@
 # Python
 __pycache__/
 *.pyc
+*.pyo
+.mypy_cache/
+.pytest_cache/
+.venv/
+.ipynb_checkpoints/
 
-# Environments
+# Environments / secrets
 .env
 
-# IDEs
+# IDE / OS
 .vscode/
 .idea/
-
-# OS
 .DS_Store
+
+# Logs and caches
+logs/
+*.log
+*.cache/
+
+# Build / coverage
+build/
+dist/
+.coverage
+htmlcov/
 
 # Data
 reels/

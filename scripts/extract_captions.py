@@ -6,6 +6,7 @@ from ocr_utils import extract_text_from_frame
 from filtering import is_redundant
 
 def process_video(video_path: Path):
+
     print(f"Processing {video_path.name}...")
     cap = cv2.VideoCapture(str(video_path))
     frame_rate = cap.get(cv2.CAP_PROP_FPS)
