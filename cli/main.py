@@ -2,7 +2,7 @@ import json
 from pathlib import Path
 import os
 import sys
-from workflows import run_workflow_from_new_hand, run_workflow_from_saved_hand
+from workflows import run_workflow_from_new_hand
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from utils.io_helpers import load_data, save_data
 from utils.format import format_hand_for_llm
@@ -57,20 +57,17 @@ def display_hand_summary(hand):
     print(f"  {hand['notes']}")
 
 def main():
-    print("Welcome to the Crusher AI")
+    print("Welcome to the Poker Coach CLI")
     while True:
         print("\nOptions:")
         print("1. Input New Hand Data")
-        print("2. Load Saved Hand + Generate AI Summary")
-        print("3. View Previous Hand")
-        print("4. Exit")
+        print("2. View Previous Hand")
+        print("3. Exit")
 
-        choice = input("\nChoose an option (1-4): ")
+        choice = input("\nChoose an option (1-3): ")
         if choice == '1':
             run_workflow_from_new_hand()
         elif choice == '2':
-            run_workflow_from_saved_hand()
-        elif choice == '3':
             try:
                 hand = load_data(DATA_PATH)
                 formatted_hand = format_hand_for_llm(hand)
@@ -86,11 +83,11 @@ def main():
                 print("Sample hand data not found. Please ensure the file exists.")
             except json.JSONDecodeError:
                 print("Error decoding the sample hand data. Please check the file format.")
-        elif choice == '4':
-            print("Exiting Crusher AI Goodbye!")
+        elif choice == '3':
+            print("Exiting the Poker Coach CLI. Goodbye!")
             break
         else:
-            print("Invalid option. Please choose a valid option (1-4).")
+            print("Invalid option. Please choose a valid option (1-3).")
 
 if __name__ == "__main__":
     main()

@@ -42,8 +42,6 @@ def serialize_hand_fixture(
         "pre": {
             "opener": pre.opener,
             "open_to": pre.open_to,
-            "bb": pre.bb,
-            "straddle": pre.straddle,
             "trail_actions": _actions_to_dicts(getattr(pre, "trail_actions", [])),
             "preflop_tokens": pre.preflop_tokens,
             "players_to_flop": pre.players_to_flop,
@@ -127,8 +125,6 @@ def load_fixture(path: str | Path) -> Tuple[HandConfig, PreflopRecord,
         opener=data["pre"]["opener"],
         open_to=data["pre"].get("open_to", data["pre"].get("open_amount")),
         trail_actions=pre_actions,
-        bb=data["pre"].get("bb", 0.0),
-        straddle=data["pre"].get("straddle", 0.0),
     )
 
     # Flop

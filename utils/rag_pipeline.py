@@ -87,6 +87,7 @@ def build_final_rag_schema(
         _safe_schema_tokens(cfg), #schema tokens may already include the betting line
         f"Preflop: {tokens['preflop']}."
     ]
+    print("1234: ", _safe_schema_tokens(cfg))
     if 'flop' in tokens:
         pieces.append(f"Flop: {tokens['flop']}. "
                       f"Flop is {facets.get('texture_class','unknown')} "
@@ -101,6 +102,7 @@ def build_final_rag_schema(
                       f"straightness={facets.get('straightness_runout')}).")
 
     embedding_text = " ".join(pieces)
+    print("5678: ", embedding_text)
 
     hard_filters = {"pot_type": pre.pot_type}
     soft_signals = {

@@ -24,8 +24,7 @@ from utils.rag_pipeline import (
     search_weaviate_hybrid,
     build_nl_summary,
 )
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'tests')))
-from test_fixtures import serialize_hand_fixture, save_fixture, load_fixture
+#from test_fixtures import serialize_hand_fixture, save_fixture
 from weaviate.classes.init import Auth
 from utils.embedding import embed
 from utils.coaching import generate_coaching_advice, build_evidence_context, evidence_card_from_obj
@@ -225,86 +224,9 @@ def run_workflow_from_new_hand():
     print("\n=== Coaching Advice ===\n")
     print(advice)
 
+
+    
     client.close()
-
-    save = input("\nSave this hand as a fixture for later replay? (y/n): ").strip().lower()
-    if save == "y":
-        name = input("Filename (default: last_hand_fixture.json): ").strip()
-        filename = name if name else "last_hand_fixture.json"
-        fixture = serialize_hand_fixture(
-            cfg=cfg,
-            pre=pre,
-            flop_result=flop_result,
-            turn_result=turn_result,
-            river_result=river_result,
-            nl_summary=nl_summary,
-            raw_query=raw_query,
-        )
-        save_fixture(fixture, filename=filename)
-
-def run_workflow_from_saved_hand(path: str = None) -> None:
-    if not path:
-        path = input("Path to fixture file (e.g. data/test_fixtures/last_hand_fixture.json): ").strip()
-
-    fixture_path = Path(path)
-    if not fixture_path.is_absolute():
-        fixture_path = Path(__file__).resolve().parents[1] / path
-
-    if not fixture_path.exists():
-        print(f"File not found: {fixture_path}")
-        return
-
-    print(f"\nLoading hand from {fixture_path}...")
-    cfg, pre, flop_result, turn_result, river_result, fixture = load_fixture(fixture_path)
-
-    flop_feats = analyze_flop(flop_result.record.board) if flop_result else {}
-
-    raw_query = fixture.get("raw_query") or build_final_rag_schema(
-        cfg=cfg,
-        pre=pre,
-        flop_rec=flop_result.record if flop_result else None,
-        flop_feats=flop_feats,
-        turn_rec=turn_result.record if turn_result else None,
-        river_rec=river_result.record if river_result else None,
-        showdown_raw=getattr(river_result, "showdown_raw", None) if river_result else None,
-    )
-
-    nl_summary = fixture.get("nl_summary") or build_nl_summary(
-        cfg=cfg,
-        pre=pre,
-        flop_rec=flop_result.record if flop_result else None,
-        turn_rec=turn_result.record if turn_result else None,
-        river_rec=river_result.record if river_result else None,
-    )
-
-    llm = ChatOpenAI(model="gpt-5-mini")
-    enriched_query = enrich_user_hand_with_llm(llm, raw_query, cfg)
-
-    headers = {"X-OpenAI-Api-Key": os.getenv("OPENAI_API_KEY")}
-    client = weaviate.connect_to_weaviate_cloud(
-        cluster_url=os.getenv("WEAVIATE_URL"),
-        auth_credentials=weaviate.auth.AuthApiKey(os.getenv("WEAVIATE_API_KEY")),
-        headers=headers,
-        skip_init_checks=True,
-    )
-
-    objects, debug = search_weaviate_hybrid(
-        client=client,
-        collection_name="PokerHand",
-        enriched_query_doc=enriched_query,
-        top_k=3,
-        alpha=0.5,
-        embed_fn=embed,
-    )
-
-    evidence_context, evidence_json = build_evidence_context(objects, k=3)
-    advice = generate_coaching_advice(nl_summary, evidence_context, evidence_json, model="gpt-5-mini")
-
-    print("\n=== Coaching Advice ===\n")
-    print(advice)
-
-    client.close()
-
 
 def main() -> None:
     print("nun")
